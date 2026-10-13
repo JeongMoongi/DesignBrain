@@ -175,6 +175,14 @@ def sync_document_to_db(page_id: str, notion_token: str):
     return True
 
 
+def delete_document_from_db(page_id: str):
+    """노션에서 삭제된 문서의 모든 청크를 인덱스에서 제거"""
+    get_qdrant().delete(
+        collection_name=COLLECTION_NAME,
+        points_selector=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))])
+    )
+    print(f"🗑️ [삭제 완료] page_id: {page_id} 의 청크를 Qdrant에서 제거했습니다.")
+
 
 # --- [6. AI Q&A 검색 및 답변 생성 함수] ---
 def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
