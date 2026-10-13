@@ -1,0 +1,9 @@
+# Python 3.12
+fastapi==0.142.2
+uvicorn==0.54.0
+python-dotenv==1.2.4
+openai==2.54.0
+qdrant-client==1.19.1
+slack-bolt==1.30.0
+slack-sdk==3.45.0
+requests==2.34.2
