@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Local vector DB
+qdrant_db/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
