@@ -13,6 +13,8 @@ NOTION_INTEGRATION_TOKEN = os.environ.get("NOTION_INTEGRATION_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
+# 노션 자동화 웹훅에 커스텀 헤더 X-Webhook-Secret 으로 같은 값을 넣는다. 비어 있으면 검증하지 않는다.
+NOTION_WEBHOOK_SECRET = os.environ.get("NOTION_WEBHOOK_SECRET")
 
 # QDRANT_URL/QDRANT_API_KEY가 없으면 로컬 디스크 DB(QDRANT_LOCAL_PATH)를 사용
 QDRANT_URL = os.environ.get("QDRANT_URL")
