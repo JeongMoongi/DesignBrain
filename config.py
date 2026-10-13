@@ -8,6 +8,8 @@ load_dotenv()
 # 동기화 시 원문/청크 전체 덤프 같은 진단 로그는 LOG_LEVEL=DEBUG 일 때만 출력된다
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+# OpenAI/Qdrant 클라이언트가 HTTP 요청마다 남기는 INFO 로그는 경고 이상만 남긴다
+logging.getLogger("httpx").setLevel(max(logging.WARNING, logging.getLogger().level))
 
 NOTION_INTEGRATION_TOKEN = os.environ.get("NOTION_INTEGRATION_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
