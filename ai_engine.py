@@ -158,11 +158,12 @@ def split_into_chunks(title: str, full_text: str) -> List[str]:
             in_unit_section = False
             continue
 
-        if line == notion_parser.TABLE_MARKER or line.startswith(notion_parser.DB_MARKER_PREFIX):
+        if line.startswith((notion_parser.TABLE_MARKER_PREFIX, notion_parser.DB_MARKER_PREFIX)):
             flush_text()
             in_unit_section = True
-            # DB 이름은 각 항목 청크에 붙여 맥락을 유지 (표 표시는 정보가 없으므로 생략)
-            section_label = line.strip("#📊 ") if line.startswith(notion_parser.DB_MARKER_PREFIX) else ""
+            # DB 이름 / 표 위치(제목 경로)를 각 데이터 단위 청크에 붙여 같은 내용의 행도 소속을 구분한다
+            # 위치 정보가 없는 표 표시는 정보가 없으므로 생략
+            section_label = "" if line == notion_parser.table_marker() else line.strip("#📊 ")
             continue
 
         if in_unit_section:

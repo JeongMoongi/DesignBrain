@@ -11,8 +11,11 @@ TEXT_BLOCK_TYPES = ("paragraph", "heading_1", "heading_2", "heading_3", "bullete
 NO_RECURSE_TYPES = ("child_database", "child_page", "table")
 
 # 데이터 단위 섹션 표시. 섹션 안의 각 줄(표 행 / DB 항목)은 한 줄 = 한 데이터 단위이며, 섹션은 빈 줄에서 끝난다.
-TABLE_MARKER = "### 📊 [상세 기획 표] ###"
+TABLE_MARKER_PREFIX = "### 📊 [상세 기획 표"
 DB_MARKER_PREFIX = "### 📊 [데이터베이스:"
+
+def table_marker(location=""):
+    return f"{TABLE_MARKER_PREFIX}: {location}] ###" if location else f"{TABLE_MARKER_PREFIX}] ###"
 
 def single_line(text):
     """여러 줄 텍스트를 ' / '로 이어 한 줄로 만든다 (데이터 단위가 줄바꿈으로 쪼개지지 않도록)"""
@@ -193,24 +196,49 @@ def image_info(b):
         "caption": plain_text(img_obj.get("caption", [])) or "도판 이미지",
     }
 
-def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0):
-    """중첩된 블록 재귀적 파싱. 이미지 블록은 images에 block_id/캡션만 모은다 (URL은 만료되므로 저장하지 않음)."""
+HEADING_LEVELS = {"heading_1": 0, "heading_2": 1, "heading_3": 2}
+# 표 바로 앞의 짧은 문단과 표를 감싼 짧은 부모 블록(토글 등)은 표 제목(예: 'attack', 'Intro')으로 보고 표 위치 정보에 포함한다.
+# 긴 문장은 제목이 아니라 본문이므로 제외
+TABLE_CAPTION_MAX_CHARS = 40
+
+def table_location(headings, parent_path, caption):
+    """표가 문서 어디에 있는지: 제목 경로 > 부모 블록 > 바로 앞 짧은 문단 (예: 'Ripper > VFX 적용 가이드 > attack')"""
+    parts = []
+    for part in [h for h in headings if h] + parent_path + [caption]:
+        if part and (not parts or parts[-1] != part):
+            parts.append(part)
+    return " > ".join(parts)
+
+def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, headings=None, parent_path=()):
+    """중첩된 블록 재귀적 파싱. 이미지 블록은 images에 block_id/캡션만 모은다 (URL은 만료되므로 저장하지 않음).
+    headings: 문서 순서대로 갱신되는 현재 [제목1, 제목2, 제목3] (재귀 전체가 공유), parent_path: 감싸고 있는 토글 등 부모 블록 텍스트"""
     if depth > 5: return
+    if headings is None:
+        headings = [None, None, None]
 
     blocks = fetch_block_children(block_id, token)
     if blocks is None:
         return
 
+    prev_sibling_text = None
     for b in blocks:
         b_type = b.get("type")
         has_children = b.get("has_children", False)
         if not b_type: continue
+        text_content = ""
 
         # 1. 텍스트 계열 블록
         if b_type in TEXT_BLOCK_TYPES:
             text_content = plain_text(b.get(b_type, {}).get("rich_text", []))
             if text_content:
                 full_text_list.append(text_content)
+                if b_type in HEADING_LEVELS:
+                    level = HEADING_LEVELS[b_type]
+                    headings[level:] = [text_content] + [None] * (2 - level)
+                    prev_sibling_text = None
+                else:
+                    prev_sibling_text = text_content
+            # 빈 문단(간격용)은 표 제목 판단에 영향을 주지 않는다
 
         # 2. 데이터베이스 및 뷰 참조 블록 (모든 종류 강제 감지)
         elif b_type in ["child_database", "link_to_page", "linked_database", "database"]:
@@ -235,7 +263,9 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0):
             column_header = b.get("table", {}).get("has_column_header", False)
             table_text = fetch_page_text_blocks(b.get("id"), token, column_header)
             if table_text:
-                full_text_list.append(f"\n{TABLE_MARKER}\n" + table_text)
+                caption = prev_sibling_text if prev_sibling_text and len(prev_sibling_text) <= TABLE_CAPTION_MAX_CHARS else None
+                location = table_location(headings, list(parent_path), caption)
+                full_text_list.append(f"\n{table_marker(location)}\n" + table_text)
 
         # 4. 이미지 블록
         elif b_type == "image":
@@ -243,9 +273,14 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0):
             if img["url"]:
                 images.append({"block_id": img["block_id"], "caption": img["caption"]})
 
-        # 5. 기타 자식 블록 탐색
+        if b_type not in TEXT_BLOCK_TYPES:
+            prev_sibling_text = None
+
+        # 5. 기타 자식 블록 탐색 (제목이 아닌 부모 블록의 텍스트는 하위 표의 위치 정보가 된다)
         if has_children and b_type not in NO_RECURSE_TYPES:
-            extract_blocks_recursive(b.get("id"), token, full_text_list, images, depth + 1)
+            is_label = text_content and b_type not in HEADING_LEVELS and len(text_content) <= TABLE_CAPTION_MAX_CHARS
+            child_path = parent_path + (text_content,) if is_label else parent_path
+            extract_blocks_recursive(b.get("id"), token, full_text_list, images, depth + 1, headings, child_path)
 
 def fetch_page_images(block_id, token, depth=0):
     """페이지 내 이미지 블록 전체 탐색. 이미지 목록이 캐싱되지 않은 (이전 버전으로 동기화된) 문서용 폴백."""
