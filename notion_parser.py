@@ -316,13 +316,29 @@ def fetch_image_by_block_id(block_id, token):
     img = image_info(b)
     return img if img["url"] else None
 
+def is_trashed(page_data):
+    return bool(page_data.get("in_trash") or page_data.get("archived"))
+
+def fetch_page(page_id, token):
+    """페이지 객체 조회. 실패하면 None"""
+    res = requests.get(f"https://api.notion.com/v1/pages/{page_id}", headers=get_headers(token), timeout=15)
+    return res.json() if res.status_code == 200 else None
+
+def is_page_trashed(page_id, token):
+    """저장 직전 재확인용. 확인 자체가 실패하면 저장하지 않도록 예외를 던진다."""
+    page_data = fetch_page(page_id, token)
+    if page_data is None:
+        raise RuntimeError(f"노션 페이지 상태 확인 실패 (page_id: {page_id})")
+    return is_trashed(page_data)
+
 def parse_notion_page_deep(page_id, token):
-    page_url = f"https://api.notion.com/v1/pages/{page_id}"
-    res = requests.get(page_url, headers=get_headers(token), timeout=15)
-    if res.status_code != 200:
+    """페이지 전체 파싱. 조회 실패 시 None, 휴지통 문서는 본문을 읽지 않고 {"trashed": True}를 반환한다."""
+    page_data = fetch_page(page_id, token)
+    if page_data is None:
         return None
-        
-    page_data = res.json()
+    if is_trashed(page_data):
+        return {"page_id": page_id, "trashed": True}
+
     props = page_data.get("properties", {})
     
     title = "제목 없음"

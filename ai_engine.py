@@ -181,10 +181,28 @@ def split_into_chunks(title: str, full_text: str) -> List[str]:
 
 
 # --- [4-2. 노션 문서 동기화 함수] ---
+# 같은 문서의 동기화/삭제는 하나씩만 실행한다. 동기화(수십 초) 도중 들어온 삭제가 먼저 끝나고
+# 뒤늦게 동기화가 저장해 휴지통 문서가 되살아나는 것을 막기 위함
+_page_locks = {}
+_page_locks_guard = threading.Lock()
+
+def _page_lock(page_id: str) -> threading.Lock:
+    with _page_locks_guard:
+        return _page_locks.setdefault(page_id, threading.Lock())
+
 def sync_document_to_db(page_id: str, notion_token: str):
-    """노션 문서를 파싱해 청크로 나눠 Qdrant에 저장. 파싱 원문과 청크 전체는 DEBUG 로그로 확인할 수 있다."""
+    """노션 문서를 파싱해 청크로 나눠 Qdrant에 저장. 휴지통 문서는 저장하지 않고 인덱스에서 제거한다."""
+    with _page_lock(page_id):
+        return _sync_document(page_id, notion_token)
+
+def _sync_document(page_id: str, notion_token: str):
     doc_data = notion_parser.parse_notion_page_deep(page_id, notion_token)
-    
+
+    if doc_data and doc_data.get("trashed"):
+        logger.info("🗑️ [동기화 생략] 휴지통에 있는 문서입니다. 인덱스에서 제거합니다. (page_id: %s)", page_id)
+        _delete_page_points(page_id)
+        return False
+
     if not doc_data or not doc_data.get("full_text"):
         logger.error("🚨 [동기화 실패] 노션 API에서 텍스트를 가져오지 못했습니다. (page_id: %s)", page_id)
         return False
@@ -217,6 +235,12 @@ def sync_document_to_db(page_id: str, notion_token: str):
         }
         points.append(PointStruct(id=chunk_point_id(page_id, idx), vector=vector, payload=payload))
 
+    # 파싱/임베딩 도중 휴지통으로 옮겨졌을 수 있으므로 저장 직전에 다시 확인 (확인 실패 시 예외로 저장 중단)
+    if notion_parser.is_page_trashed(page_id, notion_token):
+        logger.info("🗑️ [동기화 취소] 동기화 중 휴지통으로 옮겨진 문서입니다. 인덱스에서 제거합니다. (page_id: %s)", page_id)
+        _delete_page_points(page_id)
+        return False
+
     # 새 청크로 덮어쓴 뒤, 이번에 쓰지 않은 기존 청크(문서가 짧아져 남은 청크, 구버전 ID)만 삭제
     get_qdrant().upsert(collection_name=COLLECTION_NAME, points=points)
     try:
@@ -235,7 +259,11 @@ def sync_document_to_db(page_id: str, notion_token: str):
 
 
 def delete_document_from_db(page_id: str):
-    """노션에서 삭제된 문서의 모든 청크를 인덱스에서 제거"""
+    """노션에서 삭제된 문서의 모든 청크를 인덱스에서 제거 (진행 중인 같은 문서 동기화가 끝난 뒤 실행)"""
+    with _page_lock(page_id):
+        _delete_page_points(page_id)
+
+def _delete_page_points(page_id: str):
     get_qdrant().delete(
         collection_name=COLLECTION_NAME,
         points_selector=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))])
