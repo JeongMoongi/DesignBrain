@@ -3,6 +3,11 @@ import requests
 
 NOTION_VERSION = "2022-06-28"
 
+# rich_text 본문을 가진 블록 종류
+TEXT_BLOCK_TYPES = ("paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item", "to_do", "toggle", "quote", "callout")
+# 하위 블록을 따로 처리(DB 쿼리/표 파싱)하거나 별도 문서라서 재귀 탐색하지 않는 블록 종류
+NO_RECURSE_TYPES = ("child_database", "child_page", "table")
+
 def get_headers(token):
     return {
         "Authorization": f"Bearer {token}",
@@ -37,6 +42,9 @@ def fetch_all_pages(method, url, token, body=None):
         if not data.get("has_more") or not cursor:
             return results
 
+def plain_text(rich_texts):
+    return "".join(t.get("plain_text", "") for t in rich_texts).strip()
+
 def fetch_block_children(block_id, token):
     return fetch_all_pages("GET", f"https://api.notion.com/v1/blocks/{block_id}/children", token)
 
@@ -44,12 +52,8 @@ def parse_property_value(prop):
     if not prop: return ""
     p_type = prop.get("type")
     
-    if p_type == "title":
-        titles = prop.get("title", [])
-        return "".join([t.get("plain_text", "") for t in titles]).strip()
-    elif p_type == "rich_text":
-        texts = prop.get("rich_text", [])
-        return "".join([t.get("plain_text", "") for t in texts]).strip()
+    if p_type in ("title", "rich_text"):
+        return plain_text(prop.get(p_type, []))
     elif p_type == "select":
         sel = prop.get("select")
         return sel.get("name", "") if sel else ""
@@ -67,21 +71,6 @@ def parse_property_value(prop):
 def query_notion_database(db_id, token):
     return fetch_all_pages("POST", f"https://api.notion.com/v1/databases/{db_id}/query", token)
 
-def fetch_all_accessible_databases(token):
-    """토큰이 접근 가능한 모든 데이터베이스 리스트 pre-fetch"""
-    url = "https://api.notion.com/v1/search"
-    payload = {
-        "filter": {"value": "database", "property": "object"},
-        "page_size": 100
-    }
-    try:
-        res = requests.post(url, headers=get_headers(token), json=payload, timeout=15)
-        if res.status_code == 200:
-            return res.json().get("results", [])
-    except Exception as e:
-        print(f"⚠️ 전체 DB 목록 조회 실패: {e}")
-    return []
-
 def fetch_page_text_blocks(block_id, token):
     blocks = fetch_block_children(block_id, token)
     if blocks is None:
@@ -93,25 +82,21 @@ def fetch_page_text_blocks(block_id, token):
         b_type = b.get("type")
         if not b_type: continue
         
-        if b_type in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item", "to_do", "toggle", "quote", "callout"]:
-            rich_texts = b.get(b_type, {}).get("rich_text", [])
-            text_content = "".join([t.get("plain_text", "") for t in rich_texts]).strip()
+        if b_type in TEXT_BLOCK_TYPES:
+            text_content = plain_text(b.get(b_type, {}).get("rich_text", []))
             if text_content:
                 prefix = "• " if "list" in b_type else ""
                 texts.append(f"{prefix}{text_content}")
                 
         elif b_type == "table_row":
             cells = b.get("table_row", {}).get("cells", [])
-            cell_texts = []
-            for cell in cells:
-                c_text = "".join([t.get("plain_text", "") for t in cell]).strip()
-                cell_texts.append(c_text)
+            cell_texts = [plain_text(cell) for cell in cells]
             if any(cell_texts):
                 texts.append(" | ".join(cell_texts))
                 
     return "\n".join(texts)
 
-def fetch_database_rows(db_id, db_title, token, accessible_dbs=None):
+def fetch_database_rows(db_id, db_title, token):
     """뷰/DB 타겟 파싱: 엉뚱한 전체 DB 매칭을 방지하고 실제 연결된 DB 쿼리"""
     db_contents = []
     
@@ -167,7 +152,7 @@ def fetch_database_rows(db_id, db_title, token, accessible_dbs=None):
         
     return "\n".join(db_contents)
 
-def extract_blocks_recursive(block_id, token, accessible_dbs, full_text_list, depth=0):
+def extract_blocks_recursive(block_id, token, full_text_list, depth=0):
     """중첩된 블록 재귀적 파싱"""
     if depth > 5: return
 
@@ -181,9 +166,8 @@ def extract_blocks_recursive(block_id, token, accessible_dbs, full_text_list, de
         if not b_type: continue
 
         # 1. 텍스트 계열 블록
-        if b_type in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item", "to_do", "toggle", "quote", "callout"]:
-            rich_texts = b.get(b_type, {}).get("rich_text", [])
-            text_content = "".join([t.get("plain_text", "") for t in rich_texts]).strip()
+        if b_type in TEXT_BLOCK_TYPES:
+            text_content = plain_text(b.get(b_type, {}).get("rich_text", []))
             if text_content:
                 full_text_list.append(text_content)
 
@@ -201,7 +185,7 @@ def extract_blocks_recursive(block_id, token, accessible_dbs, full_text_list, de
                     target_id = link_obj.get("page_id")
 
             if target_id:
-                db_text = fetch_database_rows(target_id, db_title, token, accessible_dbs)
+                db_text = fetch_database_rows(target_id, db_title, token)
                 if db_text:
                     full_text_list.append(db_text)
 
@@ -212,8 +196,8 @@ def extract_blocks_recursive(block_id, token, accessible_dbs, full_text_list, de
                 full_text_list.append(f"\n### 📊 [상세 기획 표] ###\n" + table_text)
 
         # 4. 기타 자식 블록 탐색
-        if has_children and b_type not in ["child_database", "child_page", "table"]:
-            extract_blocks_recursive(b.get("id"), token, accessible_dbs, full_text_list, depth + 1)
+        if has_children and b_type not in NO_RECURSE_TYPES:
+            extract_blocks_recursive(b.get("id"), token, full_text_list, depth + 1)
 
 def fetch_page_images(block_id, token, depth=0):
     """페이지 내 이미지 블록 조회. 노션 파일 URL은 약 1시간 뒤 만료되므로 DB에 저장하지 않고 필요할 때마다 호출한다."""
@@ -232,22 +216,19 @@ def fetch_page_images(block_id, token, depth=0):
             img_obj = b.get("image", {})
             img_url = img_obj.get("file", {}).get("url") or img_obj.get("external", {}).get("url")
             caption_list = img_obj.get("caption", [])
-            caption = "".join([c.get("plain_text", "") for c in caption_list]).strip() or "도판 이미지"
+            caption = plain_text(caption_list) or "도판 이미지"
             if img_url:
                 # block_id: 만료되는 URL과 달리 고정값이라 슬랙 스레드 내 중복 첨부 판별에 사용
                 images.append({"block_id": b.get("id"), "url": img_url, "caption": caption})
 
-        if b.get("has_children", False) and b_type not in ["child_database", "child_page", "table"]:
+        if b.get("has_children", False) and b_type not in NO_RECURSE_TYPES:
             images.extend(fetch_page_images(b.get("id"), token, depth + 1))
 
     return images
 
 def parse_notion_page_deep(page_id, token):
-    headers = get_headers(token)
-    accessible_dbs = fetch_all_accessible_databases(token)
-    
     page_url = f"https://api.notion.com/v1/pages/{page_id}"
-    res = requests.get(page_url, headers=headers, timeout=15)
+    res = requests.get(page_url, headers=get_headers(token), timeout=15)
     if res.status_code != 200:
         return None
         
@@ -255,7 +236,7 @@ def parse_notion_page_deep(page_id, token):
     props = page_data.get("properties", {})
     
     title = "제목 없음"
-    for k, v in props.items():
+    for v in props.values():
         if v.get("type") == "title":
             title = parse_property_value(v)
             break
@@ -263,7 +244,7 @@ def parse_notion_page_deep(page_id, token):
     doc_url = page_data.get("url", "")
     full_text_list = [f"# {title}"]
 
-    extract_blocks_recursive(page_id, token, accessible_dbs, full_text_list)
+    extract_blocks_recursive(page_id, token, full_text_list)
 
     return {
         "page_id": page_id,
