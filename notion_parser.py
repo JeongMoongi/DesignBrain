@@ -10,6 +10,14 @@ TEXT_BLOCK_TYPES = ("paragraph", "heading_1", "heading_2", "heading_3", "bullete
 # 하위 블록을 따로 처리(DB 쿼리/표 파싱)하거나 별도 문서라서 재귀 탐색하지 않는 블록 종류
 NO_RECURSE_TYPES = ("child_database", "child_page", "table")
 
+# 데이터 단위 섹션 표시. 섹션 안의 각 줄(표 행 / DB 항목)은 한 줄 = 한 데이터 단위이며, 섹션은 빈 줄에서 끝난다.
+TABLE_MARKER = "### 📊 [상세 기획 표] ###"
+DB_MARKER_PREFIX = "### 📊 [데이터베이스:"
+
+def single_line(text):
+    """여러 줄 텍스트를 ' / '로 이어 한 줄로 만든다 (데이터 단위가 줄바꿈으로 쪼개지지 않도록)"""
+    return " / ".join(line.strip() for line in text.splitlines() if line.strip())
+
 def get_headers(token):
     return {
         "Authorization": f"Bearer {token}",
@@ -129,7 +137,7 @@ def fetch_database_rows(db_id, db_title, token):
     if results:
         display_title = db_title if db_title else "연관 데이터베이스"
         logger.debug("📊 [DB 파싱] %s (%d행)", display_title, len(results))
-        db_contents.append(f"\n\n### 📊 [데이터베이스: {display_title}] ###")
+        db_contents.append(f"\n\n{DB_MARKER_PREFIX} {display_title}] ###")
         
         for row in results:
             row_id = row.get("id")
@@ -161,7 +169,8 @@ def fetch_database_rows(db_id, db_title, token):
             if not detail_str:
                 detail_str = "세부 정보 없음"
                 
-            parsed_line = f"- 항목: [{row_title}] ➔ {detail_str}"
+            # 속성값/하위 페이지 본문의 줄바꿈을 없애 DB 항목 하나가 한 줄(= 청크 하나)이 되게 한다
+            parsed_line = single_line(f"- 항목: [{row_title}] ➔ {detail_str}")
             logger.debug("   %s", parsed_line[:120] + "..." if len(parsed_line) > 120 else parsed_line)
             db_contents.append(parsed_line)
             
@@ -226,7 +235,7 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0):
             column_header = b.get("table", {}).get("has_column_header", False)
             table_text = fetch_page_text_blocks(b.get("id"), token, column_header)
             if table_text:
-                full_text_list.append(f"\n### 📊 [상세 기획 표] ###\n" + table_text)
+                full_text_list.append(f"\n{TABLE_MARKER}\n" + table_text)
 
         # 4. 이미지 블록
         elif b_type == "image":

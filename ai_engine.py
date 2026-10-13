@@ -115,7 +115,71 @@ def add_backlog(assignee: str, content: str) -> str:
     return target_title
 
 
-# --- [4. 노션 문서 동기화 함수 (라인 단위 청킹 최적화)] ---
+# --- [4-1. 청킹: 일반 텍스트는 줄 단위로 묶고, 표 행/DB 항목은 데이터 단위로 하나씩] ---
+TEXT_CHUNK_CHARS = 250
+# 임베딩 입력 한도를 넘지 않도록 아주 긴 데이터 단위만 나눈다 (현재 최장 DB 항목은 약 1,250자)
+MAX_UNIT_CHARS = 2000
+
+def split_long_unit(unit: str) -> List[str]:
+    """긴 데이터 단위를 ' / ' 경계에서 나누고, 조각마다 항목명을 앞에 붙여 어느 항목인지 알 수 있게 한다."""
+    if len(unit) <= MAX_UNIT_CHARS:
+        return [unit]
+    head = unit.split(" ➔ ", 1)[0] + " ➔ (이어서) " if " ➔ " in unit else ""
+    pieces, current = [], ""
+    for part in unit.split(" / "):
+        candidate = f"{current} / {part}" if current else part
+        if current and len(head) + len(candidate) > MAX_UNIT_CHARS:
+            pieces.append(current)
+            current = part
+        else:
+            current = candidate
+    pieces.append(current)
+    # 조각 하나가 그래도 길면 글자 수로 자른다
+    limit = MAX_UNIT_CHARS - len(head)
+    pieces = [p[i:i + limit] for p in pieces for i in range(0, len(p), limit)]
+    return [pieces[0]] + [head + p for p in pieces[1:]]
+
+def split_into_chunks(title: str, full_text: str) -> List[str]:
+    doc_header = f"문서: {title}"
+    chunks = []
+    text_lines = []
+    in_unit_section = False
+    section_label = ""
+
+    def flush_text():
+        if text_lines:
+            chunks.append("\n".join([doc_header] + text_lines))
+            text_lines.clear()
+
+    for raw in full_text.split("\n"):
+        line = raw.strip()
+        if not line:
+            # 데이터 단위 섹션(표/DB)은 빈 줄에서 끝난다
+            in_unit_section = False
+            continue
+
+        if line == notion_parser.TABLE_MARKER or line.startswith(notion_parser.DB_MARKER_PREFIX):
+            flush_text()
+            in_unit_section = True
+            # DB 이름은 각 항목 청크에 붙여 맥락을 유지 (표 표시는 정보가 없으므로 생략)
+            section_label = line.strip("#📊 ") if line.startswith(notion_parser.DB_MARKER_PREFIX) else ""
+            continue
+
+        if in_unit_section:
+            flush_text()
+            for piece in split_long_unit(line):
+                chunks.append("\n".join(filter(None, [doc_header, section_label, piece])))
+            continue
+
+        if text_lines and len(doc_header) + sum(len(l) + 1 for l in text_lines) + len(line) > TEXT_CHUNK_CHARS:
+            flush_text()
+        text_lines.append(line)
+
+    flush_text()
+    return chunks
+
+
+# --- [4-2. 노션 문서 동기화 함수] ---
 def sync_document_to_db(page_id: str, notion_token: str):
     """노션 문서를 파싱해 청크로 나눠 Qdrant에 저장. 파싱 원문과 청크 전체는 DEBUG 로그로 확인할 수 있다."""
     doc_data = notion_parser.parse_notion_page_deep(page_id, notion_token)
@@ -130,21 +194,7 @@ def sync_document_to_db(page_id: str, notion_token: str):
     logger.info("📄 [동기화] '%s' 파싱 완료 (%d자)", title, len(full_text))
     logger.debug("▼ [파싱 원문: %s]\n%s\n▲ [파싱 원문 끝]", title, full_text)
 
-    # 라인 분할 및 청크 형태 확인
-    lines = [line.strip() for line in full_text.split("\n") if line.strip()]
-    chunks = []
-    current_chunk = f"문서: {title}\n"
-
-    for line in lines:
-        if len(current_chunk) + len(line) > 250 or "|" in line:
-            if len(current_chunk.strip()) > len(f"문서: {title}"):
-                chunks.append(current_chunk.strip())
-            current_chunk = f"문서: {title}\n{line}\n"
-        else:
-            current_chunk += f"{line}\n"
-
-    if len(current_chunk.strip()) > len(f"문서: {title}"):
-        chunks.append(current_chunk.strip())
+    chunks = split_into_chunks(title, full_text)
 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("🧩 [청크 %d개: %s]\n%s", len(chunks), title,
