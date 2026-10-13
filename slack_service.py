@@ -11,9 +11,10 @@ handler = None
 
 def format_markdown_for_slack(text: str) -> str:
     if not text: return ""
-    text = re.sub(r'\[(.*?)\]\((https?://[^\s]+)\)', r'<\2|🔗 \1>', text)
+    # 이미지는 링크 변환보다 먼저 제거해야 `![..](..)`가 링크로 바뀌지 않음
+    text = re.sub(r'!\[[^\]]*\]\(https?://[^\s)]+\)', '', text)
+    text = re.sub(r'\[([^\]]*)\]\((https?://[^\s)]+)\)', r'<\2|🔗 \1>', text)
     text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
-    text = re.sub(r'!\[.*?\]\(https?://[^\s]+\)', '', text)
     text = text.replace("- 참고 문서 :", "• *참고 문서:*")
     text = text.replace("- 참고 문서:", "• *참고 문서:*")
     return text.strip()
