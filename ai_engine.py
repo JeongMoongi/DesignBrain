@@ -1,9 +1,10 @@
 import os
 import re
+import uuid
 from typing import List, Dict
 from openai import OpenAI
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType
+from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType, HasIdCondition
 import notion_parser
 
 # --- [1. 환경변수 및 API 클라이언트 세팅] ---
@@ -49,14 +50,26 @@ except Exception:
 
 
 # --- [3. 텍스트 임베딩 생성 함수] ---
+EMBEDDING_BATCH_SIZE = 100
+
+def get_embeddings(texts: List[str]) -> List[List[float]]:
+    """OpenAI text-embedding-3-small 모델로 여러 텍스트를 한 번에 1536차원 벡터로 변환 (요청 한도를 넘지 않도록 배치 분할)"""
+    vectors = []
+    for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+        batch = [t.replace("\n", " ") for t in texts[start:start + EMBEDDING_BATCH_SIZE]]
+        response = openai_client.embeddings.create(
+            input=batch,
+            model="text-embedding-3-small"
+        )
+        vectors.extend(d.embedding for d in sorted(response.data, key=lambda d: d.index))
+    return vectors
+
 def get_embedding(text: str) -> List[float]:
-    """OpenAI text-embedding-3-small 모델을 사용해 텍스트를 1536차원 벡터로 변환"""
-    text = text.replace("\n", " ")
-    response = openai_client.embeddings.create(
-        input=[text],
-        model="text-embedding-3-small"
-    )
-    return response.data[0].embedding
+    return get_embeddings([text])[0]
+
+def chunk_point_id(page_id: str, idx: int) -> str:
+    """같은 문서의 같은 청크는 항상 같은 ID가 되도록 결정적 UUID 사용 (재동기화 시 덮어쓰기)"""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"notion:{page_id}:{idx}"))
 
 
 
@@ -99,17 +112,6 @@ def sync_document_to_db(page_id: str, notion_token: str):
     print(f"▲ [노션에서 파싱된 전체 원문 내용 출력 끝]")
     print(f"======================================================================\n")
 
-    # 기존 데이터 삭제
-    try:
-        client.delete(
-            collection_name=COLLECTION_NAME,
-            points_selector=Filter(
-                must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]
-            )
-        )
-    except Exception:
-        pass
-
     # 라인 분할 및 청크 형태 확인
     lines = [line.strip() for line in full_text.split("\n") if line.strip()]
     chunks = []
@@ -133,11 +135,11 @@ def sync_document_to_db(page_id: str, notion_token: str):
         print(chk)
     print(f"======================================================================\n")
 
-    # Qdrant 업서트
+    # 임베딩을 모두 성공한 뒤에만 DB를 건드린다 (중간 실패 시 기존 데이터 보존)
+    vectors = get_embeddings(chunks)
+
     points = []
-    for idx, chunk in enumerate(chunks):
-        vector = get_embedding(chunk)
-        point_id = hash(f"{page_id}_{idx}_{title}") & 0x7fffffffffffffff
+    for idx, (chunk, vector) in enumerate(zip(chunks, vectors)):
         payload = {
             "page_id": page_id,
             "title": title,
@@ -145,9 +147,21 @@ def sync_document_to_db(page_id: str, notion_token: str):
             "url": doc_data.get("url", ""),
             "chunk_idx": idx
         }
-        points.append(PointStruct(id=point_id, vector=vector, payload=payload))
+        points.append(PointStruct(id=chunk_point_id(page_id, idx), vector=vector, payload=payload))
 
+    # 새 청크로 덮어쓴 뒤, 이번에 쓰지 않은 기존 청크(문서가 짧아져 남은 청크, 구버전 ID)만 삭제
     client.upsert(collection_name=COLLECTION_NAME, points=points)
+    try:
+        client.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=Filter(
+                must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))],
+                must_not=[HasIdCondition(has_id=[p.id for p in points])]
+            )
+        )
+    except Exception as e:
+        print(f"⚠️ [Qdrant] 이전 청크 정리 실패 (새 청크는 저장됨, page_id: {page_id}): {e}")
+
     print(f"🎉 [동기화 완료] '{title}' ({len(points)}개 청크 Qdrant 저장 완료)\n")
     return True
 
