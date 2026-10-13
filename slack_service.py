@@ -64,7 +64,22 @@ def collect_page_images(page_ids, page_images, shared_block_ids, limit):
                 return collected
     return collected
 
+def failure_message(stage, reason, hint):
+    return f"❌ 답변을 만들지 못했어요.\n• *실패 단계:* {stage}\n• *원인:* {reason}\n{hint}"
+
 def process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
+    """어떤 단계에서 실패하더라도 사용자가 '분석 중' 메세지만 보고 기다리지 않도록 실패 원인을 스레드에 안내한다"""
+    try:
+        _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text)
+    except Exception as e:
+        logger.exception("🚨 [Slack] 메세지 처리 실패")
+        failure = ai_engine.describe_failure(e)
+        try:
+            say(text=failure_message("메세지 처리", failure["reason"], failure["hint"]), thread_ts=thread_ts)
+        except Exception:
+            logger.exception("🚨 [Slack] 실패 안내 메세지 전송도 실패")
+
+def _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
     cleaned_query = re.sub(r'<@.*?>', '', raw_text).strip()
 
     chat_history = []
@@ -104,7 +119,7 @@ def process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
     res = ai_engine.ask_ai_with_history(final_query, chat_history[:-1])
 
     if res.get("status") == "error":
-        say(text=f"❌ 에러 발생: {res.get('message')}", thread_ts=thread_ts)
+        say(text=failure_message(res["stage"], res["reason"], res["hint"]), thread_ts=thread_ts)
         return
 
     answer = res.get("AI_답변", "")

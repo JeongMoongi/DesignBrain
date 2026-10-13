@@ -2,8 +2,10 @@ import logging
 import threading
 import uuid
 from typing import List, Dict
+import openai
 from openai import OpenAI
 from qdrant_client import QdrantClient
+from qdrant_client.http import exceptions as qdrant_exceptions
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType, HasIdCondition
 import config
 import notion_parser
@@ -272,11 +274,50 @@ def _delete_page_points(page_id: str):
 
 
 # --- [6. AI Q&A 검색 및 답변 생성 함수] ---
+RETRY_HINT = "잠시 후 다시 질문해 주세요."
+ADMIN_HINT = "계속 실패하면 관리자에게 알려주세요."
+
+def describe_failure(e: Exception) -> Dict[str, str]:
+    """예외를 슬랙 사용자에게 보여줄 원인/대처 안내로 바꾼다"""
+    if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
+        return {"reason": "OpenAI API 키가 유효하지 않거나 권한이 없습니다.", "hint": "관리자에게 알려주세요."}
+    if isinstance(e, openai.RateLimitError):
+        if getattr(e, "code", None) == "insufficient_quota":
+            return {"reason": "OpenAI 크레딧(사용 한도)이 소진되었습니다.", "hint": "관리자에게 알려주세요."}
+        return {"reason": "OpenAI에 요청이 너무 많이 몰렸습니다.", "hint": RETRY_HINT}
+    if isinstance(e, openai.APITimeoutError):
+        return {"reason": "OpenAI 응답이 너무 오래 걸려 중단되었습니다.", "hint": RETRY_HINT}
+    if isinstance(e, openai.APIConnectionError):
+        return {"reason": "OpenAI 서버에 연결하지 못했습니다.", "hint": RETRY_HINT}
+    if isinstance(e, openai.InternalServerError):
+        return {"reason": "OpenAI 서버에 일시적인 문제가 있습니다.", "hint": RETRY_HINT}
+    if isinstance(e, openai.BadRequestError):
+        return {"reason": "OpenAI가 요청을 거부했습니다. (대화나 질문이 너무 길 수 있습니다)", "hint": "새 스레드에서 질문을 짧게 다시 해 주세요."}
+    if isinstance(e, openai.APIStatusError):
+        return {"reason": f"OpenAI 오류가 발생했습니다. (HTTP {e.status_code})", "hint": ADMIN_HINT}
+    if isinstance(e, qdrant_exceptions.UnexpectedResponse):
+        if e.status_code in (401, 403):
+            return {"reason": "기획서 DB(Qdrant) 인증에 실패했습니다.", "hint": "관리자에게 알려주세요."}
+        return {"reason": f"기획서 DB(Qdrant)가 오류를 반환했습니다. (HTTP {e.status_code})", "hint": ADMIN_HINT}
+    if isinstance(e, qdrant_exceptions.ResponseHandlingException):
+        return {"reason": "기획서 DB(Qdrant)에 연결하지 못했습니다.", "hint": RETRY_HINT}
+    return {"reason": f"예상하지 못한 오류가 발생했습니다. ({type(e).__name__})", "hint": ADMIN_HINT}
+
 def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
-    """Qdrant Cloud 벡터 검색 후 OpenAI GPT 답변 생성. 도판은 검색된 page_ids/page_images로 호출부에서 노션에서 직접 가져온다."""
+    """Qdrant Cloud 벡터 검색 후 OpenAI GPT 답변 생성. 도판은 검색된 page_ids/page_images로 호출부에서 노션에서 직접 가져온다.
+    실패하면 status=error 와 함께 실패 단계(stage), 원인(reason), 대처 안내(hint)를 돌려준다."""
+    progress = {"stage": "질문 분석"}
+    try:
+        return _ask_ai(query, chat_history, progress)
+    except Exception as e:
+        logger.exception("🚨 [답변 실패] 단계: %s | 질문: %s", progress["stage"], query)
+        return {"status": "error", "stage": progress["stage"], **describe_failure(e)}
+
+def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, str]) -> Dict:
     query_vector = get_embedding(query)
-    
+
     # 1. 벡터 코사인 유사도 검색 (Threshold 0.25 적용 및 검색 후보 10개 확장)
+    progress["stage"] = "기획서 검색"
     response = get_qdrant().query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
@@ -334,17 +375,15 @@ def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
     messages.append({"role": "user", "content": f"[컨텍스트]\n{context_str}\n\n[질문]\n{query}"})
 
     # 3. GPT 답변 생성
-    try:
-        completion = get_openai().chat.completions.create(
-            model=config.CHAT_MODEL,
-            messages=messages,
-            temperature=0.1
-        )
-        ai_reply = completion.choices[0].message.content
-        if doc_urls_str:
-            ai_reply += f"\n{doc_urls_str}"
-    except Exception as e:
-        return {"status": "error", "message": f"GPT 답변 생성 실패: {e}"}
+    progress["stage"] = "답변 생성"
+    completion = get_openai().chat.completions.create(
+        model=config.CHAT_MODEL,
+        messages=messages,
+        temperature=0.1
+    )
+    ai_reply = completion.choices[0].message.content
+    if doc_urls_str:
+        ai_reply += f"\n{doc_urls_str}"
 
     return {
         "status": "success",
