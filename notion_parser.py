@@ -10,6 +10,36 @@ def get_headers(token):
         "Content-Type": "application/json"
     }
 
+def fetch_all_pages(method, url, token, body=None):
+    """노션 목록 API는 최대 100개씩만 반환하므로 has_more가 끝날 때까지 next_cursor를 따라가며 results를 모은다.
+    첫 페이지 요청이 실패하면 None (호출부에서 폴백 판단용), 중간 페이지 실패는 문서 일부만 저장되는 것을 막기 위해 예외를 던진다."""
+    results = []
+    cursor = None
+
+    while True:
+        if method == "GET":
+            params = {"page_size": 100}
+            if cursor: params["start_cursor"] = cursor
+            res = requests.get(url, headers=get_headers(token), params=params, timeout=15)
+        else:
+            payload = {**(body or {}), "page_size": 100}
+            if cursor: payload["start_cursor"] = cursor
+            res = requests.post(url, headers=get_headers(token), json=payload, timeout=15)
+
+        if res.status_code != 200:
+            if cursor is None:
+                return None
+            raise RuntimeError(f"노션 API 페이지네이션 중 실패 ({res.status_code}): {url}")
+
+        data = res.json()
+        results.extend(data.get("results", []))
+        cursor = data.get("next_cursor")
+        if not data.get("has_more") or not cursor:
+            return results
+
+def fetch_block_children(block_id, token):
+    return fetch_all_pages("GET", f"https://api.notion.com/v1/blocks/{block_id}/children", token)
+
 def parse_property_value(prop):
     if not prop: return ""
     p_type = prop.get("type")
@@ -35,8 +65,7 @@ def parse_property_value(prop):
     return ""
 
 def query_notion_database(db_id, token):
-    url = f"https://api.notion.com/v1/databases/{db_id}/query"
-    return requests.post(url, headers=get_headers(token), json={"page_size": 100}, timeout=15)
+    return fetch_all_pages("POST", f"https://api.notion.com/v1/databases/{db_id}/query", token)
 
 def fetch_all_accessible_databases(token):
     """토큰이 접근 가능한 모든 데이터베이스 리스트 pre-fetch"""
@@ -54,13 +83,10 @@ def fetch_all_accessible_databases(token):
     return []
 
 def fetch_page_text_blocks(block_id, token):
-    url = f"https://api.notion.com/v1/blocks/{block_id}/children?page_size=100"
-    res = requests.get(url, headers=get_headers(token), timeout=15)
-    
-    if res.status_code != 200:
+    blocks = fetch_block_children(block_id, token)
+    if blocks is None:
         return ""
-        
-    blocks = res.json().get("results", [])
+
     texts = []
     
     for b in blocks:
@@ -90,51 +116,49 @@ def fetch_database_rows(db_id, db_title, token, accessible_dbs=None):
     db_contents = []
     
     # 1. Direct DB 쿼리
-    db_res = query_notion_database(db_id, token)
-    
-    if db_res.status_code == 200:
-        results = db_res.json().get("results", [])
-        if results:
-            display_title = db_title if db_title else "연관 데이터베이스"
-            print(f"\n================ [Direct DB 파싱 성공: {display_title}] ================")
-            db_contents.append(f"\n\n### 📊 [데이터베이스: {display_title}] ###")
+    results = query_notion_database(db_id, token)
+
+    if results:
+        display_title = db_title if db_title else "연관 데이터베이스"
+        print(f"\n================ [Direct DB 파싱 성공: {display_title}] ================")
+        db_contents.append(f"\n\n### 📊 [데이터베이스: {display_title}] ###")
+        
+        for row in results:
+            row_id = row.get("id")
+            row_props = row.get("properties", {})
+            row_title = ""
+            row_details = []
             
-            for row in results:
-                row_id = row.get("id")
-                row_props = row.get("properties", {})
-                row_title = ""
-                row_details = []
+            for k, v in row_props.items():
+                parsed_val = parse_property_value(v)
+                if parsed_val:
+                    if v.get("type") == "title":
+                        row_title = parsed_val
+                    else:
+                        row_details.append(f"{k}='{parsed_val}'")
+            
+            if not row_title and row_details:
+                row_title = row_details[0].split("=")[-1].strip("'")
+            elif not row_title:
+                row_title = "항목"
                 
-                for k, v in row_props.items():
-                    parsed_val = parse_property_value(v)
-                    if parsed_val:
-                        if v.get("type") == "title":
-                            row_title = parsed_val
-                        else:
-                            row_details.append(f"{k}='{parsed_val}'")
+            detail_str = ", ".join(row_details) if row_details else ""
+            
+            # 각 행의 하위 페이지 본문 딥파싱
+            if row_id:
+                inner_text = fetch_page_text_blocks(row_id, token)
+                if inner_text:
+                    detail_str = f"{detail_str} | 내용: {inner_text}".strip(" |")
+            
+            if not detail_str:
+                detail_str = "세부 정보 없음"
                 
-                if not row_title and row_details:
-                    row_title = row_details[0].split("=")[-1].strip("'")
-                elif not row_title:
-                    row_title = "항목"
-                    
-                detail_str = ", ".join(row_details) if row_details else ""
-                
-                # 각 행의 하위 페이지 본문 딥파싱
-                if row_id:
-                    inner_text = fetch_page_text_blocks(row_id, token)
-                    if inner_text:
-                        detail_str = f"{detail_str} | 내용: {inner_text}".strip(" |")
-                
-                if not detail_str:
-                    detail_str = "세부 정보 없음"
-                    
-                parsed_line = f"- 항목: [{row_title}] ➔ {detail_str}"
-                print(parsed_line[:120] + "..." if len(parsed_line) > 120 else parsed_line)
-                db_contents.append(parsed_line)
-                
-            print("===============================================================\n")
-            return "\n".join(db_contents)
+            parsed_line = f"- 항목: [{row_title}] ➔ {detail_str}"
+            print(parsed_line[:120] + "..." if len(parsed_line) > 120 else parsed_line)
+            db_contents.append(parsed_line)
+            
+        print("===============================================================\n")
+        return "\n".join(db_contents)
 
     # Fallback: 일반 블록 파싱
     fallback_text = fetch_page_text_blocks(db_id, token)
@@ -146,15 +170,10 @@ def fetch_database_rows(db_id, db_title, token, accessible_dbs=None):
 def extract_blocks_recursive(block_id, token, accessible_dbs, full_text_list, depth=0):
     """중첩된 블록 재귀적 파싱"""
     if depth > 5: return
-    
-    headers = get_headers(token)
-    blocks_url = f"https://api.notion.com/v1/blocks/{block_id}/children?page_size=100"
-    b_res = requests.get(blocks_url, headers=headers, timeout=15)
-    
-    if b_res.status_code != 200:
-        return
 
-    blocks = b_res.json().get("results", [])
+    blocks = fetch_block_children(block_id, token)
+    if blocks is None:
+        return
 
     for b in blocks:
         b_type = b.get("type")
@@ -200,14 +219,12 @@ def fetch_page_images(block_id, token, depth=0):
     """페이지 내 이미지 블록 조회. 노션 파일 URL은 약 1시간 뒤 만료되므로 DB에 저장하지 않고 필요할 때마다 호출한다."""
     if depth > 5: return []
 
-    blocks_url = f"https://api.notion.com/v1/blocks/{block_id}/children?page_size=100"
-    b_res = requests.get(blocks_url, headers=get_headers(token), timeout=15)
-
-    if b_res.status_code != 200:
+    blocks = fetch_block_children(block_id, token)
+    if blocks is None:
         return []
 
     images = []
-    for b in b_res.json().get("results", []):
+    for b in blocks:
         b_type = b.get("type")
         if not b_type: continue
 
