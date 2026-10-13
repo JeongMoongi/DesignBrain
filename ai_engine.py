@@ -154,7 +154,9 @@ def sync_document_to_db(page_id: str, notion_token: str):
             "title": title,
             "text": chunk,
             "url": doc_data.get("url", ""),
-            "chunk_idx": idx
+            "chunk_idx": idx,
+            # 이미지 block_id/캡션 캐시: 답변 시 페이지 전체를 다시 훑지 않고 이 블록들만 조회해 새 URL을 받는다
+            "images": doc_data.get("images", [])
         }
         points.append(PointStruct(id=chunk_point_id(page_id, idx), vector=vector, payload=payload))
 
@@ -186,7 +188,7 @@ def delete_document_from_db(page_id: str):
 
 # --- [6. AI Q&A 검색 및 답변 생성 함수] ---
 def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
-    """Qdrant Cloud 벡터 검색 후 OpenAI GPT 답변 생성. 도판은 검색된 page_ids로 호출부에서 노션에서 직접 가져온다."""
+    """Qdrant Cloud 벡터 검색 후 OpenAI GPT 답변 생성. 도판은 검색된 page_ids/page_images로 호출부에서 노션에서 직접 가져온다."""
     query_vector = get_embedding(query)
     
     # 1. 벡터 코사인 유사도 검색 (Threshold 0.25 적용 및 검색 후보 10개 확장)
@@ -206,11 +208,13 @@ def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
         return {
             "status": "success",
             "AI_답변": "죄송하지만, 질문과 관련된 기획서 내용을 찾을 수 없습니다.",
-            "page_ids": []
+            "page_ids": [],
+            "page_images": {}
         }
 
     context_blocks = []
     page_ids = []
+    page_images = {}
     doc_urls = set()
 
     for hit in search_results:
@@ -224,6 +228,8 @@ def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
         if url: doc_urls.add(f"[{title}]({url})")
         # 유사도 순서 유지하며 중복 제거
         if page_id and page_id not in page_ids: page_ids.append(page_id)
+        # 이미지 캐시가 없는 청크(이전 버전으로 동기화됨)는 page_images에 넣지 않아 호출부가 전체 탐색으로 폴백한다
+        if page_id and "images" in payload: page_images.setdefault(page_id, payload["images"])
 
     context_str = "\n\n".join(context_blocks)
     doc_urls_str = "\n- 참고 문서 : " + ", ".join(doc_urls) if doc_urls else ""
@@ -258,5 +264,6 @@ def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
     return {
         "status": "success",
         "AI_답변": ai_reply,
-        "page_ids": page_ids
+        "page_ids": page_ids,
+        "page_images": page_images
     }

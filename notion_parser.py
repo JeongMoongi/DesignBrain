@@ -71,12 +71,25 @@ def parse_property_value(prop):
 def query_notion_database(db_id, token):
     return fetch_all_pages("POST", f"https://api.notion.com/v1/databases/{db_id}/query", token)
 
-def fetch_page_text_blocks(block_id, token):
+def format_table_row(cell_texts, header_cells):
+    """표 행 하나를 한 줄로 만든다. 헤더가 있으면 '헤더: 값' 형태로 붙여 행 단독 청크로도 의미가 통하게 한다."""
+    if not header_cells:
+        return " | ".join(cell_texts)
+    labeled = []
+    for i, value in enumerate(cell_texts):
+        if not value: continue
+        label = header_cells[i] if i < len(header_cells) else ""
+        labeled.append(f"{label}: {value}" if label else value)
+    return " | ".join(labeled)
+
+def fetch_page_text_blocks(block_id, token, column_header=False):
+    """block_id 직속 자식 블록의 텍스트. 표 블록이면 column_header에 따라 첫 행을 헤더로 쓴다."""
     blocks = fetch_block_children(block_id, token)
     if blocks is None:
         return ""
 
     texts = []
+    header_cells = None
     
     for b in blocks:
         b_type = b.get("type")
@@ -90,10 +103,18 @@ def fetch_page_text_blocks(block_id, token):
                 
         elif b_type == "table_row":
             cells = b.get("table_row", {}).get("cells", [])
-            cell_texts = [plain_text(cell) for cell in cells]
-            if any(cell_texts):
-                texts.append(" | ".join(cell_texts))
+            # 셀 안의 줄바꿈이 남으면 행이 여러 줄로 쪼개져 청킹 시 서로 다른 청크로 흩어진다
+            cell_texts = [" ".join(plain_text(cell).split()) for cell in cells]
+            if not any(cell_texts):
+                continue
+            if column_header and header_cells is None:
+                header_cells = cell_texts
+                continue
+            texts.append(format_table_row(cell_texts, header_cells))
                 
+    # 헤더 행만 있는 표는 헤더라도 남긴다
+    if header_cells and not texts:
+        texts.append(" | ".join(header_cells))
     return "\n".join(texts)
 
 def fetch_database_rows(db_id, db_title, token):
@@ -152,8 +173,18 @@ def fetch_database_rows(db_id, db_title, token):
         
     return "\n".join(db_contents)
 
-def extract_blocks_recursive(block_id, token, full_text_list, depth=0):
-    """중첩된 블록 재귀적 파싱"""
+def image_info(b):
+    """이미지 블록에서 block_id, 캡션, (만료되는) 현재 URL 추출"""
+    img_obj = b.get("image", {})
+    return {
+        # block_id: 만료되는 URL과 달리 고정값이라 캐싱과 슬랙 스레드 내 중복 첨부 판별에 사용
+        "block_id": b.get("id"),
+        "url": img_obj.get("file", {}).get("url") or img_obj.get("external", {}).get("url"),
+        "caption": plain_text(img_obj.get("caption", [])) or "도판 이미지",
+    }
+
+def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0):
+    """중첩된 블록 재귀적 파싱. 이미지 블록은 images에 block_id/캡션만 모은다 (URL은 만료되므로 저장하지 않음)."""
     if depth > 5: return
 
     blocks = fetch_block_children(block_id, token)
@@ -191,16 +222,23 @@ def extract_blocks_recursive(block_id, token, full_text_list, depth=0):
 
         # 3. 테이블(표) 블록 파싱
         elif b_type == "table":
-            table_text = fetch_page_text_blocks(b.get("id"), token)
+            column_header = b.get("table", {}).get("has_column_header", False)
+            table_text = fetch_page_text_blocks(b.get("id"), token, column_header)
             if table_text:
                 full_text_list.append(f"\n### 📊 [상세 기획 표] ###\n" + table_text)
 
-        # 4. 기타 자식 블록 탐색
+        # 4. 이미지 블록
+        elif b_type == "image":
+            img = image_info(b)
+            if img["url"]:
+                images.append({"block_id": img["block_id"], "caption": img["caption"]})
+
+        # 5. 기타 자식 블록 탐색
         if has_children and b_type not in NO_RECURSE_TYPES:
-            extract_blocks_recursive(b.get("id"), token, full_text_list, depth + 1)
+            extract_blocks_recursive(b.get("id"), token, full_text_list, images, depth + 1)
 
 def fetch_page_images(block_id, token, depth=0):
-    """페이지 내 이미지 블록 조회. 노션 파일 URL은 약 1시간 뒤 만료되므로 DB에 저장하지 않고 필요할 때마다 호출한다."""
+    """페이지 내 이미지 블록 전체 탐색. 이미지 목록이 캐싱되지 않은 (이전 버전으로 동기화된) 문서용 폴백."""
     if depth > 5: return []
 
     blocks = fetch_block_children(block_id, token)
@@ -213,18 +251,25 @@ def fetch_page_images(block_id, token, depth=0):
         if not b_type: continue
 
         if b_type == "image":
-            img_obj = b.get("image", {})
-            img_url = img_obj.get("file", {}).get("url") or img_obj.get("external", {}).get("url")
-            caption_list = img_obj.get("caption", [])
-            caption = plain_text(caption_list) or "도판 이미지"
-            if img_url:
-                # block_id: 만료되는 URL과 달리 고정값이라 슬랙 스레드 내 중복 첨부 판별에 사용
-                images.append({"block_id": b.get("id"), "url": img_url, "caption": caption})
+            img = image_info(b)
+            if img["url"]:
+                images.append(img)
 
         if b.get("has_children", False) and b_type not in NO_RECURSE_TYPES:
             images.extend(fetch_page_images(b.get("id"), token, depth + 1))
 
     return images
+
+def fetch_image_by_block_id(block_id, token):
+    """캐싱해 둔 이미지 block_id로 블록 하나만 조회해 새 URL을 받는다. 삭제됐거나 이미지가 아니면 None."""
+    res = requests.get(f"https://api.notion.com/v1/blocks/{block_id}", headers=get_headers(token), timeout=15)
+    if res.status_code != 200:
+        return None
+    b = res.json()
+    if b.get("type") != "image" or b.get("archived") or b.get("in_trash"):
+        return None
+    img = image_info(b)
+    return img if img["url"] else None
 
 def parse_notion_page_deep(page_id, token):
     page_url = f"https://api.notion.com/v1/pages/{page_id}"
@@ -244,11 +289,13 @@ def parse_notion_page_deep(page_id, token):
     doc_url = page_data.get("url", "")
     full_text_list = [f"# {title}"]
 
-    extract_blocks_recursive(page_id, token, full_text_list)
+    images = []
+    extract_blocks_recursive(page_id, token, full_text_list, images)
 
     return {
         "page_id": page_id,
         "title": title,
         "full_text": "\n\n".join(full_text_list),
-        "url": doc_url
+        "url": doc_url,
+        "images": images
     }
