@@ -205,3 +205,7 @@ def start_slack_bot():
     if h:
         print("⚡ [Slack] Socket Mode 봇이 서브 스레드에서 시작되었습니다!")
         h.connect()
+
+def stop_slack_bot():
+    if handler:
+        handler.close()

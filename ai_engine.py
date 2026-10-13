@@ -29,6 +29,17 @@ def get_qdrant() -> QdrantClient:
             _qdrant_client = _connect_qdrant()
         return _qdrant_client
 
+def close_clients():
+    """서버 종료 시 연결 정리 (로컬 DB는 닫아야 다음 실행에서 잠금 오류가 나지 않는다)"""
+    global _openai_client, _qdrant_client
+    with _client_lock:
+        if _qdrant_client is not None:
+            _qdrant_client.close()
+            _qdrant_client = None
+        if _openai_client is not None:
+            _openai_client.close()
+            _openai_client = None
+
 def _connect_qdrant() -> QdrantClient:
     if config.QDRANT_URL and config.QDRANT_API_KEY:
         client = QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY, timeout=15.0)
