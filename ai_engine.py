@@ -1,65 +1,74 @@
-import os
-import re
+import threading
 import uuid
 from typing import List, Dict
 from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType, HasIdCondition
+import config
 import notion_parser
 
-# --- [1. 환경변수 및 API 클라이언트 세팅] ---
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-QDRANT_URL = os.environ.get("QDRANT_URL")
-QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
+# --- [1. API 클라이언트 (import 시점이 아니라 처음 사용할 때 생성)] ---
+COLLECTION_NAME = config.COLLECTION_NAME
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+_openai_client = None
+_qdrant_client = None
+# 웹훅 백그라운드 작업과 슬랙 스레드가 동시에 처음 호출해도 클라이언트는 한 번만 만든다 (로컬 DB는 중복 연결 불가)
+_client_lock = threading.Lock()
 
-# Qdrant Cloud 연결
-if QDRANT_URL and QDRANT_API_KEY:
-    client = QdrantClient(
-        url=QDRANT_URL,
-        api_key=QDRANT_API_KEY,
-        timeout=15.0
-    )
-    print("🌐 [Qdrant] Qdrant Cloud 클러스터에 성공적으로 연결되었습니다.")
-else:
-    DB_PATH = os.path.abspath("./qdrant_db")
-    client = QdrantClient(path=DB_PATH)
-    print(f"💾 [Qdrant] 로컬 디스크 기반 DB를 사용합니다. ({DB_PATH})")
+def get_openai() -> OpenAI:
+    global _openai_client
+    with _client_lock:
+        if _openai_client is None:
+            _openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
+        return _openai_client
 
-COLLECTION_NAME = "game_docs"
+def get_qdrant() -> QdrantClient:
+    global _qdrant_client
+    with _client_lock:
+        if _qdrant_client is None:
+            _qdrant_client = _connect_qdrant()
+        return _qdrant_client
 
-# --- [2. Qdrant 컬렉션 및 페이로드 인덱스 초기화] ---
-if not client.collection_exists(COLLECTION_NAME):
-    client.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
-    )
-    print(f"✨ [Qdrant] '{COLLECTION_NAME}' 컬렉션이 새로 생성되었습니다.")
+def _connect_qdrant() -> QdrantClient:
+    if config.QDRANT_URL and config.QDRANT_API_KEY:
+        client = QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY, timeout=15.0)
+        print("🌐 [Qdrant] Qdrant Cloud 클러스터에 성공적으로 연결되었습니다.")
+    else:
+        client = QdrantClient(path=config.QDRANT_LOCAL_PATH)
+        print(f"💾 [Qdrant] 로컬 디스크 기반 DB를 사용합니다. ({config.QDRANT_LOCAL_PATH})")
 
-# Qdrant Cloud 필수: page_id 인덱스 생성
-try:
-    client.create_payload_index(
-        collection_name=COLLECTION_NAME,
-        field_name="page_id",
-        field_schema=PayloadSchemaType.KEYWORD,
-    )
-    print("🔑 [Qdrant] 'page_id' 페이로드 인덱스 생성/확인 완료!")
-except Exception:
-    pass
+    # --- [2. Qdrant 컬렉션 및 페이로드 인덱스 초기화] ---
+    if not client.collection_exists(COLLECTION_NAME):
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE)
+        )
+        print(f"✨ [Qdrant] '{COLLECTION_NAME}' 컬렉션이 새로 생성되었습니다.")
+
+    # Qdrant Cloud 필수: page_id 인덱스 생성
+    try:
+        client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="page_id",
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+        print("🔑 [Qdrant] 'page_id' 페이로드 인덱스 생성/확인 완료!")
+    except Exception:
+        pass
+    return client
 
 
 # --- [3. 텍스트 임베딩 생성 함수] ---
 EMBEDDING_BATCH_SIZE = 100
 
 def get_embeddings(texts: List[str]) -> List[List[float]]:
-    """OpenAI text-embedding-3-small 모델로 여러 텍스트를 한 번에 1536차원 벡터로 변환 (요청 한도를 넘지 않도록 배치 분할)"""
+    """OpenAI 임베딩 모델로 여러 텍스트를 한 번에 1536차원 벡터로 변환 (요청 한도를 넘지 않도록 배치 분할)"""
     vectors = []
     for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
         batch = [t.replace("\n", " ") for t in texts[start:start + EMBEDDING_BATCH_SIZE]]
-        response = openai_client.embeddings.create(
+        response = get_openai().embeddings.create(
             input=batch,
-            model="text-embedding-3-small"
+            model=config.EMBEDDING_MODEL
         )
         vectors.extend(d.embedding for d in sorted(response.data, key=lambda d: d.index))
     return vectors
@@ -78,7 +87,7 @@ def chunk_point_id(page_id: str, idx: int) -> str:
 def add_backlog(assignee: str, content: str) -> str:
     """백로그 등록 핸들러"""
     try:
-        scroll_res = client.scroll(
+        scroll_res = get_qdrant().scroll(
             collection_name=COLLECTION_NAME,
             limit=1
         )
@@ -150,9 +159,9 @@ def sync_document_to_db(page_id: str, notion_token: str):
         points.append(PointStruct(id=chunk_point_id(page_id, idx), vector=vector, payload=payload))
 
     # 새 청크로 덮어쓴 뒤, 이번에 쓰지 않은 기존 청크(문서가 짧아져 남은 청크, 구버전 ID)만 삭제
-    client.upsert(collection_name=COLLECTION_NAME, points=points)
+    get_qdrant().upsert(collection_name=COLLECTION_NAME, points=points)
     try:
-        client.delete(
+        get_qdrant().delete(
             collection_name=COLLECTION_NAME,
             points_selector=Filter(
                 must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))],
@@ -166,13 +175,14 @@ def sync_document_to_db(page_id: str, notion_token: str):
     return True
 
 
+
 # --- [6. AI Q&A 검색 및 답변 생성 함수] ---
 def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
     """Qdrant Cloud 벡터 검색 후 OpenAI GPT 답변 생성. 도판은 검색된 page_ids로 호출부에서 노션에서 직접 가져온다."""
     query_vector = get_embedding(query)
     
     # 1. 벡터 코사인 유사도 검색 (Threshold 0.25 적용 및 검색 후보 10개 확장)
-    response = client.query_points(
+    response = get_qdrant().query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
         limit=10,
@@ -226,8 +236,8 @@ def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
 
     # 3. GPT 답변 생성
     try:
-        completion = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+        completion = get_openai().chat.completions.create(
+            model=config.CHAT_MODEL,
             messages=messages,
             temperature=0.1
         )

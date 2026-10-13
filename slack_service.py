@@ -1,9 +1,9 @@
-import os
 import re
 import requests
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import ai_engine
+import config
 import notion_parser
 
 slack_app = None
@@ -27,7 +27,7 @@ def image_filename(img) -> str:
 
 def collect_page_images(page_ids, shared_block_ids, limit):
     """유사도 순으로 페이지를 돌며 스레드에 아직 공유되지 않은 이미지를 최대 limit장 수집"""
-    token = os.environ.get("NOTION_INTEGRATION_TOKEN")
+    token = config.NOTION_INTEGRATION_TOKEN
     if not token:
         return []
 
@@ -126,8 +126,8 @@ def process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
 def init_slack():
     global slack_app, handler
     
-    bot_token = os.environ.get("SLACK_BOT_TOKEN")
-    app_token = os.environ.get("SLACK_APP_TOKEN")
+    bot_token = config.SLACK_BOT_TOKEN
+    app_token = config.SLACK_APP_TOKEN
     
     if not bot_token or not app_token:
         print("⚠️ [Slack] 토큰 미설정")
