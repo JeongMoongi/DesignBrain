@@ -1,3 +1,4 @@
+import logging
 import threading
 import uuid
 from typing import List, Dict
@@ -6,6 +7,8 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType, HasIdCondition
 import config
 import notion_parser
+
+logger = logging.getLogger(__name__)
 
 # --- [1. API 클라이언트 (import 시점이 아니라 처음 사용할 때 생성)] ---
 COLLECTION_NAME = config.COLLECTION_NAME
@@ -43,10 +46,10 @@ def close_clients():
 def _connect_qdrant() -> QdrantClient:
     if config.QDRANT_URL and config.QDRANT_API_KEY:
         client = QdrantClient(url=config.QDRANT_URL, api_key=config.QDRANT_API_KEY, timeout=15.0)
-        print("🌐 [Qdrant] Qdrant Cloud 클러스터에 성공적으로 연결되었습니다.")
+        logger.info("🌐 [Qdrant] Qdrant Cloud 클러스터에 연결되었습니다.")
     else:
         client = QdrantClient(path=config.QDRANT_LOCAL_PATH)
-        print(f"💾 [Qdrant] 로컬 디스크 기반 DB를 사용합니다. ({config.QDRANT_LOCAL_PATH})")
+        logger.info("💾 [Qdrant] 로컬 디스크 기반 DB를 사용합니다. (%s)", config.QDRANT_LOCAL_PATH)
 
     # --- [2. Qdrant 컬렉션 및 페이로드 인덱스 초기화] ---
     if not client.collection_exists(COLLECTION_NAME):
@@ -54,7 +57,7 @@ def _connect_qdrant() -> QdrantClient:
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE)
         )
-        print(f"✨ [Qdrant] '{COLLECTION_NAME}' 컬렉션이 새로 생성되었습니다.")
+        logger.info("✨ [Qdrant] '%s' 컬렉션이 새로 생성되었습니다.", COLLECTION_NAME)
 
     # Qdrant Cloud 필수: page_id 인덱스 생성
     try:
@@ -63,9 +66,10 @@ def _connect_qdrant() -> QdrantClient:
             field_name="page_id",
             field_schema=PayloadSchemaType.KEYWORD,
         )
-        print("🔑 [Qdrant] 'page_id' 페이로드 인덱스 생성/확인 완료!")
-    except Exception:
-        pass
+        logger.debug("🔑 [Qdrant] 'page_id' 페이로드 인덱스 생성/확인 완료")
+    except Exception as e:
+        # 이미 존재하는 경우 등
+        logger.debug("[Qdrant] page_id 인덱스 생성 생략: %s", e)
     return client
 
 
@@ -107,30 +111,24 @@ def add_backlog(assignee: str, content: str) -> str:
     except Exception:
         target_title = "일반 기획서"
 
-    print(f"📝 [백로그 등록] 대상: {target_title} | 담당자: {assignee} | 내용: {content}")
+    logger.info("📝 [백로그 등록] 대상: %s | 담당자: %s | 내용: %s", target_title, assignee, content)
     return target_title
 
 
 # --- [4. 노션 문서 동기화 함수 (라인 단위 청킹 최적화)] ---
 def sync_document_to_db(page_id: str, notion_token: str):
-    """추측 배제! 파싱된 원시 데이터와 Qdrant 저장 청크 형태를 직접 검증하는 진단 로직"""
-    print(f"\n==================== [1. 노션 원시 파싱 데이터 검증] ====================")
+    """노션 문서를 파싱해 청크로 나눠 Qdrant에 저장. 파싱 원문과 청크 전체는 DEBUG 로그로 확인할 수 있다."""
     doc_data = notion_parser.parse_notion_page_deep(page_id, notion_token)
     
     if not doc_data or not doc_data.get("full_text"):
-        print(f"🚨 [실패] 노션 API에서 텍스트를 전혀 가져오지 못했습니다. (page_id: {page_id})")
+        logger.error("🚨 [동기화 실패] 노션 API에서 텍스트를 가져오지 못했습니다. (page_id: %s)", page_id)
         return False
         
     title = doc_data.get("title", "제목 없음")
     full_text = doc_data.get("full_text", "")
     
-    print(f"📄 문서 제목: '{title}'")
-    print(f"📏 총 글자 수: {len(full_text)} 자")
-    print(f"----------------------------------------------------------------------")
-    print(f"▼ [노션에서 파싱된 전체 원문 내용 출력 시작]")
-    print(full_text)
-    print(f"▲ [노션에서 파싱된 전체 원문 내용 출력 끝]")
-    print(f"======================================================================\n")
+    logger.info("📄 [동기화] '%s' 파싱 완료 (%d자)", title, len(full_text))
+    logger.debug("▼ [파싱 원문: %s]\n%s\n▲ [파싱 원문 끝]", title, full_text)
 
     # 라인 분할 및 청크 형태 확인
     lines = [line.strip() for line in full_text.split("\n") if line.strip()]
@@ -148,12 +146,9 @@ def sync_document_to_db(page_id: str, notion_token: str):
     if len(current_chunk.strip()) > len(f"문서: {title}"):
         chunks.append(current_chunk.strip())
 
-    print(f"==================== [2. Qdrant에 저장될 청크 데이터 검증] ====================")
-    print(f"🧩 생성된 총 청크 개수: {len(chunks)}개")
-    for idx, chk in enumerate(chunks):
-        print(f"\n--- [청크 #{idx+1}] ---")
-        print(chk)
-    print(f"======================================================================\n")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("🧩 [청크 %d개: %s]\n%s", len(chunks), title,
+                     "\n".join(f"--- [청크 #{idx+1}] ---\n{chk}" for idx, chk in enumerate(chunks)))
 
     # 임베딩을 모두 성공한 뒤에만 DB를 건드린다 (중간 실패 시 기존 데이터 보존)
     vectors = get_embeddings(chunks)
@@ -182,9 +177,9 @@ def sync_document_to_db(page_id: str, notion_token: str):
             )
         )
     except Exception as e:
-        print(f"⚠️ [Qdrant] 이전 청크 정리 실패 (새 청크는 저장됨, page_id: {page_id}): {e}")
+        logger.warning("⚠️ [Qdrant] 이전 청크 정리 실패 (새 청크는 저장됨, page_id: %s): %s", page_id, e)
 
-    print(f"🎉 [동기화 완료] '{title}' ({len(points)}개 청크 Qdrant 저장 완료)\n")
+    logger.info("🎉 [동기화 완료] '%s' (%d개 청크 저장)", title, len(points))
     return True
 
 
@@ -194,7 +189,7 @@ def delete_document_from_db(page_id: str):
         collection_name=COLLECTION_NAME,
         points_selector=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))])
     )
-    print(f"🗑️ [삭제 완료] page_id: {page_id} 의 청크를 Qdrant에서 제거했습니다.")
+    logger.info("🗑️ [삭제 완료] page_id: %s 의 청크를 Qdrant에서 제거했습니다.", page_id)
 
 
 # --- [6. AI Q&A 검색 및 답변 생성 함수] ---
@@ -211,9 +206,9 @@ def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
     )
     search_results = response.points
     
-    print(f"\n🔍 [Qdrant 검색 결과 개수]: {len(search_results)}개")
+    logger.info("🔍 [Qdrant 검색] %d개 결과", len(search_results))
     for idx, hit in enumerate(search_results):
-        print(f"   └ [{idx+1}] Score: {hit.score:.4f} | Title: {hit.payload.get('title')} | Text: {hit.payload.get('text')[:50]}...")
+        logger.debug("   └ [%d] Score: %.4f | Title: %s | Text: %s...", idx + 1, hit.score, hit.payload.get("title"), hit.payload.get("text", "")[:50])
 
     if not search_results:
         return {

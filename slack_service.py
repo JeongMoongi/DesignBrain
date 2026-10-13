@@ -1,3 +1,4 @@
+import logging
 import re
 import requests
 from slack_bolt import App
@@ -5,6 +6,8 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 import ai_engine
 import config
 import notion_parser
+
+logger = logging.getLogger(__name__)
 
 slack_app = None
 handler = None
@@ -39,7 +42,7 @@ def collect_page_images(page_ids, page_images, shared_block_ids, limit):
         try:
             candidates = cached if cached is not None else notion_parser.fetch_page_images(page_id, token)
         except Exception as e:
-            print(f"⚠️ [Notion] 이미지 조회 실패 (page_id: {page_id}): {e}")
+            logger.warning("⚠️ [Notion] 이미지 조회 실패 (page_id: %s): %s", page_id, e)
             continue
 
         for img in candidates:
@@ -52,7 +55,7 @@ def collect_page_images(page_ids, page_images, shared_block_ids, limit):
                 try:
                     img = notion_parser.fetch_image_by_block_id(block_id, token)
                 except Exception as e:
-                    print(f"⚠️ [Notion] 이미지 블록 조회 실패 (block_id: {block_id}): {e}")
+                    logger.warning("⚠️ [Notion] 이미지 블록 조회 실패 (block_id: %s): %s", block_id, e)
                     img = None
                 if not img:
                     continue
@@ -86,7 +89,7 @@ def process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
             if role == "user":
                 full_thread_context.append(msg_text)
     except Exception as e:
-        print(f"⚠️ 히스토리 수집 (DM 또는 단발 메세지): {e}")
+        logger.info("스레드 히스토리 수집 생략 (DM 또는 단발 메세지): %s", e)
 
     final_query = cleaned_query
     if not final_query and full_thread_context:
@@ -114,7 +117,7 @@ def process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
 
     # 미공유된 신규 이미지 파일만 최대 2장 슬랙 전송
     if image_objs:
-        print(f"📤 [Slack] 신규 연관 기획 도판 {len(image_objs)}장 전송 시작...")
+        logger.info("📤 [Slack] 신규 연관 기획 도판 %d장 전송", len(image_objs))
 
         for img in image_objs:
             img_url = img.get("url")
@@ -131,7 +134,7 @@ def process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
                         title=f"📸 {caption}"
                     )
             except Exception as img_err:
-                print(f"🚨 [Slack] 이미지 파일 업로드 실패: {img_err}")
+                logger.error("🚨 [Slack] 이미지 파일 업로드 실패: %s", img_err)
 
 
 def init_slack():
@@ -141,7 +144,7 @@ def init_slack():
     app_token = config.SLACK_APP_TOKEN
     
     if not bot_token or not app_token:
-        print("⚠️ [Slack] 토큰 미설정")
+        logger.warning("⚠️ [Slack] 토큰 미설정으로 봇을 시작하지 않습니다.")
         return None
 
     slack_app = App(token=bot_token)
@@ -159,7 +162,7 @@ def init_slack():
         thread_ts = event.get("thread_ts") or event.get("ts")
         text = event.get("text", "")
         
-        print(f"📢 [채널 멘션 수신] {text}")
+        logger.info("📢 [채널 멘션 수신] %s", text)
         process_chat_and_reply(client, say, channel_id, thread_ts, text)
 
     # 3. 1:1 DM 메세지 처리
@@ -175,7 +178,7 @@ def init_slack():
             channel_id = event.get("channel")
             thread_ts = event.get("ts")
             
-            print(f"💬 [DM 수신] 유저({user_id}): {user_text}")
+            logger.info("💬 [DM 수신] 유저(%s): %s", user_id, user_text)
             process_chat_and_reply(client, say, channel_id, thread_ts, user_text)
 
     # 4. /백로그 커맨드 처리
@@ -203,7 +206,7 @@ def init_slack():
 def start_slack_bot():
     h = init_slack()
     if h:
-        print("⚡ [Slack] Socket Mode 봇이 서브 스레드에서 시작되었습니다!")
+        logger.info("⚡ [Slack] Socket Mode 봇을 시작합니다.")
         h.connect()
 
 def stop_slack_bot():

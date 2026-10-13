@@ -1,8 +1,13 @@
+import logging
 import os
 from dotenv import load_dotenv
 
 # .env를 가장 먼저 읽어 두면 다른 모듈의 import 순서와 무관하게 설정값을 쓸 수 있다
 load_dotenv()
+
+# 동기화 시 원문/청크 전체 덤프 같은 진단 로그는 LOG_LEVEL=DEBUG 일 때만 출력된다
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
 NOTION_INTEGRATION_TOKEN = os.environ.get("NOTION_INTEGRATION_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")

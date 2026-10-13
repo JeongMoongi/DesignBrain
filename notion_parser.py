@@ -1,5 +1,7 @@
-import os
+import logging
 import requests
+
+logger = logging.getLogger(__name__)
 
 NOTION_VERSION = "2022-06-28"
 
@@ -126,7 +128,7 @@ def fetch_database_rows(db_id, db_title, token):
 
     if results:
         display_title = db_title if db_title else "연관 데이터베이스"
-        print(f"\n================ [Direct DB 파싱 성공: {display_title}] ================")
+        logger.debug("📊 [DB 파싱] %s (%d행)", display_title, len(results))
         db_contents.append(f"\n\n### 📊 [데이터베이스: {display_title}] ###")
         
         for row in results:
@@ -160,10 +162,9 @@ def fetch_database_rows(db_id, db_title, token):
                 detail_str = "세부 정보 없음"
                 
             parsed_line = f"- 항목: [{row_title}] ➔ {detail_str}"
-            print(parsed_line[:120] + "..." if len(parsed_line) > 120 else parsed_line)
+            logger.debug("   %s", parsed_line[:120] + "..." if len(parsed_line) > 120 else parsed_line)
             db_contents.append(parsed_line)
             
-        print("===============================================================\n")
         return "\n".join(db_contents)
 
     # Fallback: 일반 블록 파싱
