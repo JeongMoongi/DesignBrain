@@ -1,0 +1,196 @@
+"""백로그: 기획서와 실제 결정 사항의 차이를 기록해 두었다가, 관련 질문의 답변 끝에 참고 문구로 붙이고
+담당자에게 해결될 때까지 매일 확인 DM을 보낸다. 기획서와 별도 컬렉션(config.BACKLOG_COLLECTION)에 저장한다."""
+import logging
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
+from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct
+import ai_engine
+import config
+
+logger = logging.getLogger(__name__)
+
+KST = timezone(timedelta(hours=9))
+OPEN, RESOLVED = "open", "resolved"
+
+# 답변에 붙일 백로그 선택 기준 (질문 벡터와 백로그 내용의 코사인 유사도).
+# 실측(2026-10-13): 관련 질문 0.40~0.54, 같은 기획서의 무관한 질문 0.27, 다른 주제 0.10~0.21
+# - 답변이 참고한 기획서에 연결된 백로그: 질문과 어느 정도만 관련 있으면 붙인다
+# - 연결된 기획서가 다른 백로그: 질문과 내용이 강하게 겹칠 때만 붙인다
+LINKED_MIN_SCORE = 0.33
+UNLINKED_MIN_SCORE = 0.40
+MAX_NOTES_PER_ANSWER = 3
+
+# 슬랙 멘션 형식: <@U123> 또는 <@U123|이름>
+MENTION_PATTERN = re.compile(r"^\s*<@([UW][A-Z0-9]+)(?:\|[^>]*)?>\s*(.*)$", re.S)
+# 노션 페이지 URL 끝의 32자리 ID
+NOTION_PAGE_ID_PATTERN = re.compile(r"notion\.(?:so|com)/[^\s|>)]*?([0-9a-f]{32})(?![0-9a-f])")
+
+
+def parse_command(text: str):
+    """'<@담당자> 내용' 을 (담당자 ID, 내용)으로. 형식이 틀리면 None"""
+    m = MENTION_PATTERN.match(text or "")
+    if not m or not m.group(2).strip():
+        return None
+    return m.group(1), m.group(2).strip()
+
+
+def page_ids_in_text(text: str) -> List[str]:
+    """메세지에 들어 있는 노션 링크에서 페이지 ID(하이픈 형식)를 순서대로 추출"""
+    ids = []
+    for raw in NOTION_PAGE_ID_PATTERN.findall(text or ""):
+        page_id = str(uuid.UUID(raw))
+        if page_id not in ids:
+            ids.append(page_id)
+    return ids
+
+
+def linked_docs(page_ids: List[str]) -> List[Dict[str, str]]:
+    """인덱스에 있는 문서만 골라 제목/URL과 함께 돌려준다 (링크는 있지만 인덱싱되지 않은 문서는 제외)"""
+    docs = []
+    for page_id in page_ids:
+        points = ai_engine.get_qdrant().scroll(
+            collection_name=config.COLLECTION_NAME, limit=1, with_payload=["title", "url"],
+            scroll_filter=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]),
+        )[0]
+        if points:
+            docs.append({"page_id": page_id, "title": points[0].payload.get("title", ""), "url": points[0].payload.get("url", "")})
+    return docs
+
+
+NOTE_ENDING = "확인하셨습니다."
+# 참고 문구가 원문 단어를 이만큼 이상 그대로 담고 있어야 한다 (요약하다 사실이 빠지는 것을 막음)
+NOTE_MIN_WORD_COVERAGE = 0.8
+NOTE_EXAMPLES = [
+    ("UI 팝업 닫기 버튼 위치가 우상단으로 바뀌었는데 공통 UI 기획서는 아직 좌상단으로 되어 있음",
+     "UI 팝업 닫기 버튼 위치가 우상단으로 바뀌었는데 공통 UI 기획서는 아직 좌상단으로 되어 있는 것을 확인하셨습니다."),
+    ("파트너 영입 비용 300골드로 확정. 리더/파트너 기획서 수치 수정 필요",
+     "파트너 영입 비용이 300골드로 확정되어 리더/파트너 기획서의 수치 수정이 필요한 것을 확인하셨습니다."),
+    # '발견함/확인함'은 '확인하셨습니다'와 뜻이 겹치므로 떼어 낸다
+    ("Tank 돌진 공격에 넉백을 넣기로 했었는데 챕터 3 몹 기획서에는 빠져 있는 것을 발견함",
+     "Tank 돌진 공격에 넉백을 넣기로 했었는데 챕터 3 몹 기획서에는 빠져 있는 것을 확인하셨습니다."),
+    ("상점 갱신 비용은 회차마다 초기화하기로 함",
+     "상점 갱신 비용은 회차마다 초기화하기로 한 것을 확인하셨습니다."),
+]
+
+def note_covers_content(note: str, content: str) -> bool:
+    words = [w for w in re.findall(r"[0-9A-Za-z가-힣_]+", content) if len(w) > 1]
+    if not words:
+        return True
+    # 어미는 바뀔 수 있으므로 단어 앞 2글자로 비교
+    return sum(1 for w in words if w[:2] in note) / len(words) >= NOTE_MIN_WORD_COVERAGE
+
+def write_note(reporter_name: Optional[str], content: str) -> str:
+    """답변 끝에 붙일 참고 문구를 등록 시점에 한 번 만들어 저장한다 (답변마다 문구가 달라지지 않도록).
+    형식이 틀리거나 원문 내용이 빠지면 원문을 그대로 쓰는 기본 문구를 사용한다."""
+    subject = f"{reporter_name} 님이" if reporter_name else "팀원이"
+    fallback = f"{subject} 남긴 메모: {content}"
+    messages = [{"role": "system", "content": (
+        "기획팀 슬랙 봇이 답변 끝에 덧붙일 참고 문구의 본문을 만든다. 백로그 메모를 '~것을 확인하셨습니다.'로 끝나는 한 문장으로 바꿔라.\n"
+        "메모의 단어(기획서 이름, 대상, 수치, 결정 내용)는 하나도 빼거나 바꾸지 말고 어미만 자연스럽게 고친다. "
+        "새로운 내용을 덧붙이지 말고, 주어는 쓰지 말고, 문장만 출력한다."
+    )}]
+    for memo, sentence in NOTE_EXAMPLES:
+        messages += [{"role": "user", "content": memo}, {"role": "assistant", "content": sentence}]
+    messages.append({"role": "user", "content": content})
+    try:
+        completion = ai_engine.get_openai().chat.completions.create(model=config.CHAT_MODEL, temperature=0, messages=messages)
+        body = completion.choices[0].message.content.strip()
+    except Exception as e:
+        logger.warning("백로그 참고 문구 생성 실패, 기본 문구 사용: %s", e)
+        return fallback
+    # 한 문장('~습니다.'가 한 번)이어야 한다: '…발견하셨습니다. 확인하셨습니다.' 같은 중복 어미를 거른다
+    if not body.endswith(NOTE_ENDING) or body.count("습니다") != 1 or not note_covers_content(body, content):
+        logger.warning("백로그 참고 문구가 형식/내용 검증을 통과하지 못해 기본 문구를 사용합니다: %s", body)
+        return fallback
+    return f"{subject} {body}"
+
+
+def add(reporter_id: str, reporter_name: Optional[str], assignee_id: str, assignee_name: Optional[str],
+        content: str, docs: List[Dict[str, str]], source: Dict[str, str]) -> Dict:
+    backlog_id = str(uuid.uuid4())
+    record = {
+        "backlog_id": backlog_id,
+        "content": content,
+        "note": write_note(reporter_name, content),
+        "reporter_id": reporter_id,
+        "reporter_name": reporter_name,
+        "assignee_id": assignee_id,
+        "assignee_name": assignee_name,
+        "page_ids": [d["page_id"] for d in docs],
+        "docs": docs,
+        "status": OPEN,
+        "created_at": datetime.now(KST).isoformat(),  # 같은 초에 등록돼도 순서가 유지되도록 마이크로초까지
+        "source": source,
+    }
+    vector = ai_engine.get_embedding(content)
+    ai_engine.get_qdrant().upsert(collection_name=config.BACKLOG_COLLECTION,
+                                  points=[PointStruct(id=backlog_id, vector=vector, payload=record)])
+    logger.info("📝 [백로그 등록] %s | 담당자: %s | 기획서: %s", content, assignee_id, [d["title"] for d in docs])
+    return record
+
+
+def notes_for_answer(query_vector: List[float], answer_page_ids: List[str]) -> List[str]:
+    """답변에 덧붙일 미해결 백로그 참고 문구 (관련도 높은 순)"""
+    hits = ai_engine.get_qdrant().query_points(
+        collection_name=config.BACKLOG_COLLECTION, query=query_vector, limit=10, with_payload=True,
+        query_filter=Filter(must=[FieldCondition(key="status", match=MatchValue(value=OPEN))]),
+    ).points
+    answer_pages = set(answer_page_ids)
+    notes = []
+    for hit in hits:
+        linked = bool(answer_pages & set(hit.payload.get("page_ids", [])))
+        if hit.score >= (LINKED_MIN_SCORE if linked else UNLINKED_MIN_SCORE):
+            notes.append(hit.payload["note"])
+        if len(notes) >= MAX_NOTES_PER_ANSWER:
+            break
+    return notes
+
+
+def get(backlog_id: str) -> Optional[Dict]:
+    points = ai_engine.get_qdrant().retrieve(collection_name=config.BACKLOG_COLLECTION, ids=[backlog_id], with_payload=True)
+    return points[0].payload if points else None
+
+
+def open_by_assignee() -> Dict[str, List[Dict]]:
+    """담당자 ID별 미해결 백로그 (오래된 순)"""
+    grouped, offset = {}, None
+    while True:
+        points, offset = ai_engine.get_qdrant().scroll(
+            collection_name=config.BACKLOG_COLLECTION, limit=256, offset=offset, with_payload=True,
+            scroll_filter=Filter(must=[FieldCondition(key="status", match=MatchValue(value=OPEN))]),
+        )
+        for p in points:
+            grouped.setdefault(p.payload["assignee_id"], []).append(p.payload)
+        if offset is None:
+            break
+    for items in grouped.values():
+        items.sort(key=lambda r: r["created_at"])
+    return grouped
+
+
+def resolve(backlog_id: str, user_id: str) -> str:
+    """담당자만 해결 처리할 수 있다. 결과: resolved / already / not_assignee / not_found"""
+    record = get(backlog_id)
+    if record is None:
+        return "not_found"
+    if record["assignee_id"] != user_id:
+        return "not_assignee"
+    if record["status"] == RESOLVED:
+        return "already"
+    ai_engine.get_qdrant().set_payload(
+        collection_name=config.BACKLOG_COLLECTION, points=[backlog_id],
+        payload={"status": RESOLVED, "resolved_at": datetime.now(KST).isoformat(timespec="seconds"), "resolved_by": user_id},
+    )
+    logger.info("✅ [백로그 해결] %s (담당자: %s)", record["content"], user_id)
+    return "resolved"
+
+
+def seconds_until_next(hour: int, now: Optional[datetime] = None) -> float:
+    """다음 hour시 정각(한국 시간)까지 남은 초"""
+    now = now or datetime.now(KST)
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()

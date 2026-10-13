@@ -23,6 +23,10 @@ QDRANT_URL = os.environ.get("QDRANT_URL")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
 QDRANT_LOCAL_PATH = os.path.abspath("./qdrant_db")
 COLLECTION_NAME = "game_docs"
+# 백로그는 기획서와 별도 컬렉션에 둔다 (기획서 재동기화/삭제가 백로그를 건드리지 않도록)
+BACKLOG_COLLECTION = "backlogs"
+# 매일 이 시각(한국 시간)에 담당자에게 미해결 백로그 확인 DM을 보낸다
+BACKLOG_REMINDER_HOUR = 10
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536

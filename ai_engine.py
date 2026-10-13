@@ -9,6 +9,8 @@ from qdrant_client.http import exceptions as qdrant_exceptions
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType, HasIdCondition
 import config
 import notion_parser
+# backlog도 ai_engine을 import한다. 서로 함수 안에서만 참조하므로 순환 import 문제는 없다
+import backlog
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +56,23 @@ def _connect_qdrant() -> QdrantClient:
         logger.info("💾 [Qdrant] 로컬 디스크 기반 DB를 사용합니다. (%s)", config.QDRANT_LOCAL_PATH)
 
     # --- [2. Qdrant 컬렉션 및 페이로드 인덱스 초기화] ---
-    if not client.collection_exists(COLLECTION_NAME):
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE)
-        )
-        logger.info("✨ [Qdrant] '%s' 컬렉션이 새로 생성되었습니다.", COLLECTION_NAME)
+    # Qdrant Cloud는 필터에 쓰는 필드에 인덱스가 필요하다
+    for collection, indexed_fields in ((COLLECTION_NAME, ["page_id"]),
+                                       (config.BACKLOG_COLLECTION, ["status", "assignee_id", "page_ids"])):
+        if not client.collection_exists(collection):
+            client.create_collection(
+                collection_name=collection,
+                vectors_config=VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE)
+            )
+            logger.info("✨ [Qdrant] '%s' 컬렉션이 새로 생성되었습니다.", collection)
 
-    # Qdrant Cloud 필수: page_id 인덱스 생성
-    try:
-        client.create_payload_index(
-            collection_name=COLLECTION_NAME,
-            field_name="page_id",
-            field_schema=PayloadSchemaType.KEYWORD,
-        )
-        logger.debug("🔑 [Qdrant] 'page_id' 페이로드 인덱스 생성/확인 완료")
-    except Exception as e:
-        # 이미 존재하는 경우 등
-        logger.debug("[Qdrant] page_id 인덱스 생성 생략: %s", e)
+        for field in indexed_fields:
+            try:
+                client.create_payload_index(collection_name=collection, field_name=field, field_schema=PayloadSchemaType.KEYWORD)
+                logger.debug("🔑 [Qdrant] '%s.%s' 페이로드 인덱스 생성/확인 완료", collection, field)
+            except Exception as e:
+                # 이미 존재하는 경우 등
+                logger.debug("[Qdrant] %s.%s 인덱스 생성 생략: %s", collection, field, e)
     return client
 
 
@@ -98,23 +99,6 @@ def chunk_point_id(page_id: str, idx: int) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"notion:{page_id}:{idx}"))
 
 
-
-
-# --- [5. 백로그 등록 함수] ---
-def add_backlog(assignee: str, content: str) -> str:
-    """백로그 등록 핸들러"""
-    try:
-        scroll_res = get_qdrant().scroll(
-            collection_name=COLLECTION_NAME,
-            limit=1
-        )
-        points = scroll_res[0]
-        target_title = points[0].payload.get("title", "공통 기획서") if points else "일반 기획서"
-    except Exception:
-        target_title = "일반 기획서"
-
-    logger.info("📝 [백로그 등록] 대상: %s | 담당자: %s | 내용: %s", target_title, assignee, content)
-    return target_title
 
 
 # --- [4-1. 청킹: 일반 텍스트는 줄 단위로 묶고, 표 행/DB 항목은 데이터 단위로 하나씩] ---
@@ -382,6 +366,16 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
         temperature=0.1
     )
     ai_reply = completion.choices[0].message.content
+
+    # 4. 관련 미해결 백로그 참고 문구 (실패해도 답변은 그대로 보낸다)
+    try:
+        notes = backlog.notes_for_answer(query_vector, page_ids)
+    except Exception as e:
+        logger.warning("⚠️ [백로그] 참고 문구 조회 실패, 답변만 보냅니다: %s", e)
+        notes = []
+    if notes:
+        ai_reply += "\n\n" + "\n".join(f"📌 참고 : {note}" for note in notes)
+
     if doc_urls_str:
         ai_reply += f"\n{doc_urls_str}"
 
