@@ -140,8 +140,20 @@ def test_slack_shows_failure_reason(monkeypatch):
     assert slack.updates[-1]["text"] == slack_service.failure_message("기획서 검색", "원인", "안내")
 
 
-def test_slack_reports_unexpected_errors(monkeypatch):
+def test_slack_reports_unexpected_errors_in_place(monkeypatch):
     monkeypatch.setattr(ai_engine, "ask_ai_with_history", raiser(ValueError("boom")))
+    said, slack = [], FakeSlack()
+    slack_service.process_chat_and_reply(slack, recorder(said), "C", "1", "1", "<@BOT> 질문")
+    # '분석 중' 메세지가 실패 안내로 바뀌고, 새 메세지는 보내지 않는다
+    assert len(said) == 1
+    assert slack.updates[-1]["ts"] == "1"
+    assert "메세지 처리" in slack.updates[-1]["text"] and "ValueError" in slack.updates[-1]["text"]
+
+
+def test_slack_reports_errors_as_new_message_when_update_fails(monkeypatch):
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", raiser(ValueError("boom")))
+    slack = FakeSlack()
+    slack.chat_update = raiser(RuntimeError("update failed"))
     said = []
-    slack_service.process_chat_and_reply(FakeSlack(), recorder(said), "C", "1", "1", "<@BOT> 질문")
-    assert "메세지 처리" in said[-1] and "ValueError" in said[-1]
+    slack_service.process_chat_and_reply(slack, recorder(said), "C", "1", "1", "<@BOT> 질문")
+    assert len(said) == 2 and "ValueError" in said[-1]

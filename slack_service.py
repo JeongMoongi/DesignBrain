@@ -82,18 +82,27 @@ def event_thread_ts(event):
     return event.get("thread_ts") or event.get("ts")
 
 def process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text):
-    """어떤 단계에서 실패하더라도 사용자가 '분석 중' 메세지만 보고 기다리지 않도록 실패 원인을 스레드에 안내한다"""
+    """어떤 단계에서 실패하더라도 사용자가 '분석 중' 메세지만 보고 기다리지 않도록 실패 원인을 스레드에 안내한다.
+    '분석 중' 메세지를 이미 보냈다면 그 메세지를 실패 안내로 바꾼다."""
+    sent = {}
     try:
-        _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text)
+        _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text, sent)
     except Exception as e:
         logger.exception("🚨 [Slack] 메세지 처리 실패")
         failure = ai_engine.describe_failure(e)
+        text = failure_message("메세지 처리", failure["reason"], failure["hint"])
+        if sent.get("placeholder_ts"):
+            try:
+                client.chat_update(channel=channel_id, ts=sent["placeholder_ts"], text=text)
+                return
+            except Exception:
+                logger.exception("🚨 [Slack] '분석 중' 메세지를 실패 안내로 바꾸지 못해 새로 보냅니다")
         try:
-            say(text=failure_message("메세지 처리", failure["reason"], failure["hint"]), thread_ts=thread_ts)
+            say(text=text, thread_ts=thread_ts)
         except Exception:
             logger.exception("🚨 [Slack] 실패 안내 메세지 전송도 실패")
 
-def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text):
+def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text, sent):
     cleaned_query = re.sub(r'<@.*?>', '', raw_text).strip()
 
     chat_history = []
@@ -130,7 +139,7 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
 
     # '분석 중' 메세지를 답변(또는 실패 안내)으로 바꿔, 스레드에 답변당 메세지 하나만 남긴다
     placeholder = say(text=f"🤔 기획서를 읽고 분석 중입니다...", thread_ts=thread_ts)
-    placeholder_ts = placeholder["ts"]
+    placeholder_ts = sent["placeholder_ts"] = placeholder["ts"]
 
     res = ai_engine.ask_ai_with_history(final_query, chat_history)
 
