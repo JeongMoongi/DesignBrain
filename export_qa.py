@@ -3,11 +3,13 @@
     python export_qa.py                  # 전체 기록
     python export_qa.py --days 7         # 최근 7일
     python export_qa.py --out 기록.csv   # 파일 이름 지정 (기본: qa_logs_날짜.csv)
+    python export_qa.py --open           # 만든 뒤 엑셀로 바로 열기 (Windows, export_qa.bat이 사용)
 
 PC에서 실행해도 같은 Qdrant Cloud를 읽으므로 VM에 접속하지 않아도 된다.
 """
 import argparse
 import csv
+import os
 import sys
 from datetime import datetime, timedelta
 import backlog
@@ -46,10 +48,13 @@ def main(args):
     parser = argparse.ArgumentParser(description="질문 기록을 CSV로 내려받는다")
     parser.add_argument("--days", type=int, help="최근 며칠 기록만 (생략하면 전체)")
     parser.add_argument("--out", help="저장할 파일 이름")
+    parser.add_argument("--open", action="store_true", help="만든 뒤 기본 프로그램(엑셀)으로 열기")
     opts = parser.parse_args(args)
-    path = opts.out or f"qa_logs_{datetime.now(backlog.KST):%Y%m%d}.csv"
+    path = opts.out or f"qa_logs_{datetime.now(backlog.KST):%Y%m%d_%H%M}.csv"
     count = export(path, opts.days)
-    print(f"질문 기록 {count}건을 {path} 에 저장했습니다.")
+    print(f"질문 기록 {count}건을 {os.path.abspath(path)} 에 저장했습니다.")
+    if opts.open:
+        os.startfile(os.path.abspath(path))
     return 0
 
 
