@@ -213,16 +213,18 @@ def _sync_document(page_id: str, notion_token: str):
 
     points = []
     for idx, (chunk, vector) in enumerate(zip(chunks, vectors)):
+        item = chunk_item_name(chunk)
         payload = {
             "page_id": page_id,
             "title": title,
             "text": chunk,
             "url": doc_data.get("url", ""),
             "chunk_idx": idx,
-            # 이미지 block_id/캡션 캐시: 답변 시 페이지 전체를 다시 훑지 않고 이 블록들만 조회해 새 URL을 받는다
-            "images": doc_data.get("images", [])
+            # 이미지 block_id/캡션 캐시: 답변 시 이 블록들만 조회해 새 URL을 받는다.
+            # DB 항목 청크에는 그 항목 페이지의 이미지만, 나머지 청크에는 문서 본문의 이미지를 단다
+            "images": [{"block_id": img["block_id"], "caption": img["caption"]}
+                       for img in doc_data.get("images", []) if img.get("item", "") == item]
         }
-        item = chunk_item_name(chunk)
         if item:
             payload["item"] = item
         points.append(PointStruct(id=chunk_point_id(page_id, idx), vector=vector, payload=payload))
@@ -344,8 +346,9 @@ def match_names(query: str, catalog: Dict[str, set]) -> List[tuple]:
                 targets.append(target)
     return targets
 
-def search_chunks(query: str, query_vector: List[float]) -> list:
-    """이름이 일치한 문서/항목 안에서 먼저 찾고, 나머지는 벡터 유사도 검색으로 채운다"""
+def search_chunks(query: str, query_vector: List[float]) -> tuple:
+    """이름이 일치한 문서/항목 안에서 먼저 찾고, 나머지는 벡터 유사도 검색으로 채운다.
+    (검색 결과, 앞쪽의 이름 일치 결과 개수)를 돌려준다."""
     try:
         catalog = _get_name_catalog()
     except Exception as e:
@@ -373,7 +376,7 @@ def search_chunks(query: str, query_vector: List[float]) -> list:
     if named:
         logger.info("📇 [이름 일치] %d개 청크를 먼저 사용", len(named))
     combined = named + [p for p in similar if p.id not in seen]
-    return combined[:max(SEARCH_LIMIT, len(named))]
+    return combined[:max(SEARCH_LIMIT, len(named))], len(named)
 
 
 # --- [6. AI Q&A 검색 및 답변 생성 함수] ---
@@ -407,7 +410,7 @@ def describe_failure(e: Exception) -> Dict[str, str]:
     return {"reason": f"예상하지 못한 오류가 발생했습니다. ({type(e).__name__})", "hint": ADMIN_HINT}
 
 def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
-    """Qdrant Cloud 벡터 검색 후 OpenAI GPT 답변 생성. 도판은 검색된 page_ids/page_images로 호출부에서 노션에서 직접 가져온다.
+    """Qdrant Cloud 벡터 검색 후 OpenAI GPT 답변 생성. 도판은 검색된 images(block_id 목록)로 호출부에서 노션에서 직접 가져온다.
     실패하면 status=error 와 함께 실패 단계(stage), 원인(reason), 대처 안내(hint)를 돌려준다."""
     progress = {"stage": "질문 분석"}
     try:
@@ -461,7 +464,7 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
 
     # 1. 이름 일치 + 벡터 코사인 유사도 검색
     progress["stage"] = "기획서 검색"
-    search_results = search_chunks(search_query, query_vector)
+    search_results, named_count = search_chunks(search_query, query_vector)
 
     logger.info("🔍 [Qdrant 검색] %d개 결과", len(search_results))
     for idx, hit in enumerate(search_results):
@@ -472,13 +475,12 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
             "status": "success",
             "AI_답변": "죄송하지만, 질문과 관련된 기획서 내용을 찾을 수 없습니다.",
             "page_ids": [],
-            "page_images": {}
+            "images": []
         }
 
     context_blocks = []
     page_ids = []
-    page_images = {}
-    doc_urls = set()
+    doc_urls = []
 
     for hit in search_results:
         payload = hit.payload
@@ -488,11 +490,19 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
         page_id = payload.get("page_id")
 
         context_blocks.append(f"[참고 문서: {title}]\n{text}")
-        if url: doc_urls.add(f"[{title}]({url})")
-        # 유사도 순서 유지하며 중복 제거
+        # 검색 순서(이름 일치 → 유사도)를 유지하며 중복 제거
+        link = f"[{title}]({url})"
+        if url and link not in doc_urls: doc_urls.append(link)
         if page_id and page_id not in page_ids: page_ids.append(page_id)
-        # 이미지 캐시가 없는 청크(이전 버전으로 동기화됨)는 page_images에 넣지 않아 호출부가 전체 탐색으로 폴백한다
-        if page_id and "images" in payload: page_images.setdefault(page_id, payload["images"])
+
+    # 이름이 일치한 문서/항목이 있으면 그 이미지만 쓴다 (유사도로 채운 무관한 문서의 도판이 붙지 않게)
+    image_hits = search_results[:named_count] if named_count else search_results
+    images, seen_block_ids = [], set()
+    for hit in image_hits:
+        for img in hit.payload.get("images", []):
+            if img.get("block_id") and img["block_id"] not in seen_block_ids:
+                seen_block_ids.add(img["block_id"])
+                images.append(img)
 
     context_str = "\n\n".join(context_blocks)
     doc_urls_str = "\n- 참고 문서 : " + ", ".join(doc_urls) if doc_urls else ""
@@ -536,5 +546,5 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
         "status": "success",
         "AI_답변": ai_reply,
         "page_ids": page_ids,
-        "page_images": page_images
+        "images": images
     }

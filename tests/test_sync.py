@@ -41,6 +41,20 @@ def test_sync_stores_chunks_with_image_cache(notion_page, local_db):
     assert points[0].payload["images"] == [{"block_id": "img1", "caption": "도판"}]
 
 
+def test_db_item_images_go_only_to_their_item_chunk(notion_page, local_db, monkeypatch):
+    def extract(page_id, token, out, images, *args, **kwargs):
+        out.extend(["본문 한 줄", "\n".join([f"{np.DB_MARKER_PREFIX} 몹] ###", "- 항목: [석화체] ➔ 유형='슈퍼아머'",
+                                             "- 항목: [분쇄자] ➔ 유형='떡대'"])])
+        images.append({"block_id": "page_img", "caption": "도판"})
+        images.append({"block_id": "petri_img", "caption": "도판", "item": "석화체"})
+    monkeypatch.setattr(np, "extract_blocks_recursive", extract)
+
+    ai_engine.sync_document_to_db("P", "tok")
+    points = local_db.scroll(ai_engine.COLLECTION_NAME, limit=10)[0]
+    images = {p.payload.get("item", ""): [i["block_id"] for i in p.payload["images"]] for p in points}
+    assert images == {"": ["page_img"], "석화체": ["petri_img"], "분쇄자": []}
+
+
 def test_resync_overwrites_instead_of_duplicating(notion_page, local_db):
     ai_engine.sync_document_to_db("P", "tok")
     ai_engine.sync_document_to_db("P", "tok")

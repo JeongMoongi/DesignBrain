@@ -35,7 +35,7 @@ def test_thread_reply_uses_parent_thread_history(monkeypatch):
     received = {}
     def fake_ask(query, history):
         received.update(query=query, history=history)
-        return {"status": "success", "AI_답변": "답변", "page_ids": [], "page_images": {}}
+        return {"status": "success", "AI_답변": "답변", "page_ids": [], "images": []}
     monkeypatch.setattr(ai_engine, "ask_ai_with_history", fake_ask)
 
     event = {"ts": "300", "thread_ts": "100", "channel": "D1", "text": "패턴은 뭐가 있어?"}

@@ -97,11 +97,16 @@ def test_database_item_is_single_line(monkeypatch, fake_notion):
             "요약": {"type": "rich_text", "rich_text": rt("첫 줄\n\n둘째 줄")},
         },
     }])
-    fake_notion["r1"] = [text_block("paragraph", "본문 1"), text_block("bulleted_list_item", "본문 2")]
-    text = np.fetch_database_rows("db", "패턴 목록", "tok")
+    fake_notion["r1"] = [text_block("paragraph", "본문 1"), text_block("bulleted_list_item", "본문 2"),
+                         {"id": "img1", "type": "image", "has_children": False,
+                          "image": {"file": {"url": "https://s3/x.png"}, "caption": rt("포자 도판")}}]
+    images = []
+    text = np.fetch_database_rows("db", "패턴 목록", "tok", images)
     lines = text.strip("\n").split("\n")
     assert lines == [f"{np.DB_MARKER_PREFIX} 패턴 목록] ###",
                      "- 항목: [포자] ➔ 요약='첫 줄 / 둘째 줄' | 내용: 본문 1 / • 본문 2"]
+    # 행 페이지의 이미지는 그 항목 이름과 함께 모인다
+    assert images == [{"block_id": "img1", "caption": "포자 도판", "item": "포자"}]
 
 
 @pytest.mark.parametrize("page,expected", [

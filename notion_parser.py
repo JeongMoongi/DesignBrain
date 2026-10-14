@@ -130,8 +130,9 @@ def fetch_page_text_blocks(block_id, token, column_header=False):
         texts.append(" | ".join(header_cells))
     return "\n".join(texts)
 
-def fetch_database_rows(db_id, db_title, token):
-    """뷰/DB 타겟 파싱: 엉뚱한 전체 DB 매칭을 방지하고 실제 연결된 DB 쿼리"""
+def fetch_database_rows(db_id, db_title, token, images):
+    """뷰/DB 타겟 파싱: 엉뚱한 전체 DB 매칭을 방지하고 실제 연결된 DB 쿼리.
+    각 행 페이지의 이미지는 항목 이름(item)과 함께 images에 모아, 그 항목 청크에만 연결되게 한다."""
     db_contents = []
     
     # 1. Direct DB 쿼리
@@ -168,6 +169,8 @@ def fetch_database_rows(db_id, db_title, token):
                 inner_text = fetch_page_text_blocks(row_id, token)
                 if inner_text:
                     detail_str = f"{detail_str} | 내용: {inner_text}".strip(" |")
+                for img in fetch_page_images(row_id, token):
+                    images.append({"block_id": img["block_id"], "caption": img["caption"], "item": row_title})
             
             if not detail_str:
                 detail_str = "세부 정보 없음"
@@ -254,7 +257,7 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, h
                     target_id = link_obj.get("page_id")
 
             if target_id:
-                db_text = fetch_database_rows(target_id, db_title, token)
+                db_text = fetch_database_rows(target_id, db_title, token, images)
                 if db_text:
                     full_text_list.append(db_text)
 
@@ -283,7 +286,7 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, h
             extract_blocks_recursive(b.get("id"), token, full_text_list, images, depth + 1, headings, child_path)
 
 def fetch_page_images(block_id, token, depth=0):
-    """페이지 내 이미지 블록 전체 탐색. 이미지 목록이 캐싱되지 않은 (이전 버전으로 동기화된) 문서용 폴백."""
+    """페이지 내 이미지 블록 전체 탐색 (DB 행 페이지의 이미지 수집용)"""
     if depth > 5: return []
 
     blocks = fetch_block_children(block_id, token)

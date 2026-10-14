@@ -41,9 +41,35 @@ def test_named_item_comes_first_even_when_dissimilar(local_db):
         point(1, "P1", "챕터 1 몹", "- 항목: [분쇄자] ➔ 짧은 설명", vec(1.0, 0.0), item="분쇄자"),
         point(0, "P2", "파트너 특성 시스템", "효과: 쿨타임 감소", vec(1.0, 0.1)),
     ])
-    results = ai_engine.search_chunks("석화체 패턴 알려줘", vec(1.0, 0.0))
+    results, named_count = ai_engine.search_chunks("석화체 패턴 알려줘", vec(1.0, 0.0))
+    assert named_count == 1
     assert results[0].payload["item"] == "석화체"
     assert len({p.id for p in results}) == len(results) == 3
+
+
+def test_answer_uses_images_of_named_item_and_ranked_links(local_db, monkeypatch):
+    def with_images(p, images):
+        p.payload["images"] = [{"block_id": b, "caption": "도판"} for b in images]
+        p.payload["url"] = f"https://notion/{p.payload['page_id']}"
+        return p
+    local_db.upsert(config.COLLECTION_NAME, points=[
+        with_images(point(0, "P1", "챕터 1 몹", "- 항목: [석화체] ➔ 설명", vec(0.0, 1.0), item="석화체"), ["petri"]),
+        with_images(point(0, "P2", "파트너 특성 시스템", "효과: 쿨타임 감소", vec(1.0, 0.0)), ["partner"]),
+    ])
+    monkeypatch.setattr(ai_engine, "get_embedding", lambda q: vec(1.0, 0.0))
+    monkeypatch.setattr(ai_engine.backlog, "notes_for_answer", lambda vector, page_ids: [])
+
+    class Completions:
+        @staticmethod
+        def create(**kwargs):
+            return type("C", (), {"choices": [type("Ch", (), {"message": type("M", (), {"content": "답변"})()})()]})()
+    monkeypatch.setattr(ai_engine, "get_openai", lambda: type("O", (), {"chat": type("Chat", (), {"completions": Completions})}))
+
+    result = ai_engine.ask_ai_with_history("석화체 알려줘", [])
+    # 유사도로 채운 '파트너 특성 시스템'의 도판은 쓰지 않는다
+    assert [img["block_id"] for img in result["images"]] == ["petri"]
+    # 참고 문서는 검색 순서(이름 일치 먼저)대로
+    assert result["AI_답변"].index("[챕터 1 몹]") < result["AI_답변"].index("[파트너 특성 시스템]")
 
 
 def test_ambiguous_names_are_ignored(local_db):

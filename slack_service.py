@@ -30,40 +30,28 @@ def image_filename(img) -> str:
     """업로드 파일명에 노션 이미지 block_id를 넣어 이후 스레드에서 중복 첨부 여부를 판별"""
     return f"{img.get('caption', '기획 도판')}_{img.get('block_id')}.jpg"
 
-def collect_page_images(page_ids, page_images, shared_block_ids, limit):
-    """유사도 순으로 페이지를 돌며 스레드에 아직 공유되지 않은 이미지를 최대 limit장 수집.
-    page_images에 캐싱된 block_id가 있으면 그 블록만 조회하고, 없으면 페이지 전체를 탐색한다."""
+def collect_images(candidates, shared_block_ids, limit):
+    """검색 순서대로 스레드에 아직 공유되지 않은 이미지를 최대 limit장 수집.
+    캐시에는 만료되는 URL이 없으므로 블록을 하나씩 조회해 새 URL을 받는다."""
     token = config.NOTION_INTEGRATION_TOKEN
     if not token:
         return []
 
     collected = []
-    seen_block_ids = set()
-    for page_id in page_ids:
-        cached = page_images.get(page_id)
-        try:
-            candidates = cached if cached is not None else notion_parser.fetch_page_images(page_id, token)
-        except Exception as e:
-            logger.warning("⚠️ [Notion] 이미지 조회 실패 (page_id: %s): %s", page_id, e)
+    for candidate in candidates:
+        block_id = candidate.get("block_id")
+        if not block_id or block_id in shared_block_ids:
             continue
-
-        for img in candidates:
-            block_id = img.get("block_id")
-            if not block_id or block_id in seen_block_ids or block_id in shared_block_ids:
-                continue
-            seen_block_ids.add(block_id)
-            if cached is not None:
-                # 캐시에는 만료되는 URL이 없으므로 블록을 조회해 새 URL을 받는다
-                try:
-                    img = notion_parser.fetch_image_by_block_id(block_id, token)
-                except Exception as e:
-                    logger.warning("⚠️ [Notion] 이미지 블록 조회 실패 (block_id: %s): %s", block_id, e)
-                    img = None
-                if not img:
-                    continue
-            collected.append(img)
-            if len(collected) >= limit:
-                return collected
+        try:
+            img = notion_parser.fetch_image_by_block_id(block_id, token)
+        except Exception as e:
+            logger.warning("⚠️ [Notion] 이미지 블록 조회 실패 (block_id: %s): %s", block_id, e)
+            continue
+        if not img:
+            continue
+        collected.append(img)
+        if len(collected) >= limit:
+            break
     return collected
 
 def failure_message(stage, reason, hint):
@@ -138,7 +126,7 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
     say(text=formatted_answer, thread_ts=thread_ts)
 
     # 답변 전송 후, 검색된 문서의 이미지를 노션에서 직접 가져온다 (노션 파일 URL은 만료되므로 DB에 저장하지 않음)
-    image_objs = collect_page_images(res.get("page_ids", []), res.get("page_images", {}), shared_block_ids, limit=2)
+    image_objs = collect_images(res.get("images", []), shared_block_ids, limit=2)
 
     # 미공유된 신규 이미지 파일만 최대 2장 슬랙 전송
     if image_objs:
