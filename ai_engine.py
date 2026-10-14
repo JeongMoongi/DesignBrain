@@ -97,6 +97,16 @@ def get_embeddings(texts: List[str]) -> List[List[float]]:
 def get_embedding(text: str) -> List[float]:
     return get_embeddings([text])[0]
 
+IMAGE_CAPTION_PATH_DEPTH = 2
+IMAGE_CAPTION_MAX_CHARS = 80
+
+def image_caption(img: Dict, name: str) -> str:
+    """슬랙에 보여줄 도판 설명: '문서/항목 이름 · 노션 캡션(없으면 이미지가 놓인 제목 경로)' (예: '석화체 · 패턴 > Powerbomb')
+    깊은 제목 경로는 이미지에 가까운 마지막 두 단계만 쓰고, 너무 길면 자른다."""
+    detail = img.get("caption") or " > ".join((img.get("section") or "").split(" > ")[-IMAGE_CAPTION_PATH_DEPTH:])
+    caption = " ".join(f"{name} · {detail}".split()) if detail else name
+    return caption if len(caption) <= IMAGE_CAPTION_MAX_CHARS else caption[:IMAGE_CAPTION_MAX_CHARS - 1] + "…"
+
 def chunk_point_id(page_id: str, idx: int) -> str:
     """같은 문서의 같은 청크는 항상 같은 ID가 되도록 결정적 UUID 사용 (재동기화 시 덮어쓰기)"""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"notion:{page_id}:{idx}"))
@@ -222,7 +232,7 @@ def _sync_document(page_id: str, notion_token: str):
             "chunk_idx": idx,
             # 이미지 block_id/캡션 캐시: 답변 시 이 블록들만 조회해 새 URL을 받는다.
             # DB 항목 청크에는 그 항목 페이지의 이미지만, 나머지 청크에는 문서 본문의 이미지를 단다
-            "images": [{"block_id": img["block_id"], "caption": img["caption"]}
+            "images": [{"block_id": img["block_id"], "caption": image_caption(img, item or title)}
                        for img in doc_data.get("images", []) if img.get("item", "") == item]
         }
         if item:

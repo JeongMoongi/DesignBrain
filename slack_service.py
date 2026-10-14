@@ -52,7 +52,8 @@ def collect_images(candidates, shared_block_ids, limit):
             continue
         if not img:
             continue
-        collected.append(img)
+        # 노션 블록에는 캡션이 비어 있는 경우가 많으므로 동기화 때 만든 설명을 쓴다
+        collected.append({**img, "caption": candidate.get("caption") or img.get("caption") or "기획 도판"})
         if len(collected) >= limit:
             break
     return collected

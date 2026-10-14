@@ -38,7 +38,8 @@ def test_sync_stores_chunks_with_image_cache(notion_page, local_db):
     assert ai_engine.sync_document_to_db("P", "tok") is True
     points = local_db.scroll(ai_engine.COLLECTION_NAME, limit=10)[0]
     assert len(points) == 1
-    assert points[0].payload["images"] == [{"block_id": "img1", "caption": "도판"}]
+    # 캡션 앞에 문서 이름을 붙여 슬랙에서 어떤 도판인지 알 수 있게 한다
+    assert points[0].payload["images"] == [{"block_id": "img1", "caption": "문서 · 도판"}]
 
 
 def test_db_item_images_go_only_to_their_item_chunk(notion_page, local_db, monkeypatch):

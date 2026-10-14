@@ -170,7 +170,8 @@ def fetch_database_rows(db_id, db_title, token, images):
                 if inner_text:
                     detail_str = f"{detail_str} | 내용: {inner_text}".strip(" |")
                 for img in fetch_page_images(row_id, token):
-                    images.append({"block_id": img["block_id"], "caption": img["caption"], "item": row_title})
+                    images.append({"block_id": img["block_id"], "caption": img["caption"],
+                                   "section": img["section"], "item": row_title})
             
             if not detail_str:
                 detail_str = "세부 정보 없음"
@@ -196,7 +197,8 @@ def image_info(b):
         # block_id: 만료되는 URL과 달리 고정값이라 캐싱과 슬랙 스레드 내 중복 첨부 판별에 사용
         "block_id": b.get("id"),
         "url": img_obj.get("file", {}).get("url") or img_obj.get("external", {}).get("url"),
-        "caption": plain_text(img_obj.get("caption", [])) or "도판 이미지",
+        # 노션 캡션 (없으면 빈 문자열. 표시용 캡션은 동기화 때 이미지가 놓인 제목 경로로 채운다)
+        "caption": plain_text(img_obj.get("caption", [])),
     }
 
 HEADING_LEVELS = {"heading_1": 0, "heading_2": 1, "heading_3": 2}
@@ -274,7 +276,8 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, h
         elif b_type == "image":
             img = image_info(b)
             if img["url"]:
-                images.append({"block_id": img["block_id"], "caption": img["caption"]})
+                images.append({"block_id": img["block_id"], "caption": img["caption"],
+                               "section": table_location(headings, list(parent_path), None)})
 
         if b_type not in TEXT_BLOCK_TYPES:
             prev_sibling_text = None
@@ -285,9 +288,11 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, h
             child_path = parent_path + (text_content,) if is_label else parent_path
             extract_blocks_recursive(b.get("id"), token, full_text_list, images, depth + 1, headings, child_path)
 
-def fetch_page_images(block_id, token, depth=0):
-    """페이지 내 이미지 블록 전체 탐색 (DB 행 페이지의 이미지 수집용)"""
+def fetch_page_images(block_id, token, depth=0, headings=None):
+    """페이지 내 이미지 블록 전체 탐색 (DB 행 페이지의 이미지 수집용). 이미지마다 놓인 위치의 제목 경로(section)를 붙인다."""
     if depth > 5: return []
+    if headings is None:
+        headings = [None, None, None]
 
     blocks = fetch_block_children(block_id, token)
     if blocks is None:
@@ -298,13 +303,19 @@ def fetch_page_images(block_id, token, depth=0):
         b_type = b.get("type")
         if not b_type: continue
 
+        if b_type in HEADING_LEVELS:
+            text_content = plain_text(b.get(b_type, {}).get("rich_text", []))
+            if text_content:
+                level = HEADING_LEVELS[b_type]
+                headings[level:] = [text_content] + [None] * (2 - level)
+
         if b_type == "image":
             img = image_info(b)
             if img["url"]:
-                images.append(img)
+                images.append({**img, "section": table_location(headings, [], None)})
 
         if b.get("has_children", False) and b_type not in NO_RECURSE_TYPES:
-            images.extend(fetch_page_images(b.get("id"), token, depth + 1))
+            images.extend(fetch_page_images(b.get("id"), token, depth + 1, headings))
 
     return images
 

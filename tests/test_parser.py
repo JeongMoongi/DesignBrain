@@ -82,11 +82,16 @@ def test_short_parent_block_is_part_of_location(fake_notion):
 
 
 def test_images_are_collected_without_url(fake_notion):
-    fake_notion["page"] = [{"id": "img1", "type": "image", "has_children": False,
-                            "image": {"file": {"url": "https://s3/x.png"}, "caption": rt("도판")}}]
+    fake_notion["page"] = [text_block("heading_1", "패턴"), text_block("heading_3", "Powerbomb"),
+                           {"id": "img1", "type": "image", "has_children": False,
+                            "image": {"file": {"url": "https://s3/x.png"}, "caption": rt("도판")}},
+                           {"id": "img2", "type": "image", "has_children": False,
+                            "image": {"file": {"url": "https://s3/y.png"}, "caption": []}}]
     images = []
     np.extract_blocks_recursive("page", "tok", [], images)
-    assert images == [{"block_id": "img1", "caption": "도판"}]
+    # 이미지가 놓인 제목 경로를 함께 모은다 (캡션이 없는 이미지의 설명으로 쓴다)
+    assert images == [{"block_id": "img1", "caption": "도판", "section": "패턴 > Powerbomb"},
+                      {"block_id": "img2", "caption": "", "section": "패턴 > Powerbomb"}]
 
 
 def test_database_item_is_single_line(monkeypatch, fake_notion):
@@ -98,15 +103,16 @@ def test_database_item_is_single_line(monkeypatch, fake_notion):
         },
     }])
     fake_notion["r1"] = [text_block("paragraph", "본문 1"), text_block("bulleted_list_item", "본문 2"),
+                         text_block("heading_3", "Spore"),
                          {"id": "img1", "type": "image", "has_children": False,
                           "image": {"file": {"url": "https://s3/x.png"}, "caption": rt("포자 도판")}}]
     images = []
     text = np.fetch_database_rows("db", "패턴 목록", "tok", images)
     lines = text.strip("\n").split("\n")
     assert lines == [f"{np.DB_MARKER_PREFIX} 패턴 목록] ###",
-                     "- 항목: [포자] ➔ 요약='첫 줄 / 둘째 줄' | 내용: 본문 1 / • 본문 2"]
+                     "- 항목: [포자] ➔ 요약='첫 줄 / 둘째 줄' | 내용: 본문 1 / • 본문 2 / Spore"]
     # 행 페이지의 이미지는 그 항목 이름과 함께 모인다
-    assert images == [{"block_id": "img1", "caption": "포자 도판", "item": "포자"}]
+    assert images == [{"block_id": "img1", "caption": "포자 도판", "section": "Spore", "item": "포자"}]
 
 
 @pytest.mark.parametrize("page,expected", [

@@ -4,6 +4,18 @@ import ai_engine
 import config
 
 
+@pytest.mark.parametrize("img,expected", [
+    ({"caption": "보스 등장 연출", "section": "패턴 > Powerbomb"}, "석화체 · 보스 등장 연출"),  # 노션 캡션 우선
+    ({"caption": "", "section": "패턴 > Powerbomb"}, "석화체 · 패턴 > Powerbomb"),
+    ({"caption": "", "section": ""}, "석화체"),
+    ({"caption": "", "section": "상세 > 맵 클리어 보상 > 획득 절차 > 보상 활성화"}, "석화체 · 획득 절차 > 보상 활성화"),
+    ({"caption": "초록색 : 넉백 3\n붉은색 : 없음", "section": ""}, "석화체 · 초록색 : 넉백 3 붉은색 : 없음"),
+    ({"caption": "가" * 100, "section": ""}, "석화체 · " + "가" * 73 + "…"),
+])
+def test_image_caption(img, expected):
+    assert ai_engine.image_caption(img, "석화체") == expected
+
+
 def test_chunk_item_name():
     chunk = "문서: 챕터 1 몹\n[데이터베이스: 챕터 1 몹]\n- 항목: [석화체] ➔ 유형='슈퍼아머'"
     assert ai_engine.chunk_item_name(chunk) == "석화체"
