@@ -190,6 +190,27 @@ def fetch_database_rows(db_id, db_title, token, images):
         
     return "\n".join(db_contents)
 
+# 다른 문서를 가리키는 링크 표시. 답변에서는 필요할 때만 '참고 자료'로 가볍게 언급한다
+LINK_REFERENCE_PREFIX = "🔗 참고 링크:"
+
+def link_reference(link, token):
+    """link_to_page 블록이 가리키는 페이지/DB의 제목과 주소. 연동에 공유되지 않아 조회할 수 없으면 None"""
+    kind = link.get("type")
+    if kind not in ("page_id", "database_id"):
+        return None
+    endpoint = "pages" if kind == "page_id" else "databases"
+    res = requests.get(f"https://api.notion.com/v1/{endpoint}/{link[kind]}", headers=get_headers(token), timeout=15)
+    if res.status_code != 200:
+        return None
+    data = res.json()
+    if is_trashed(data):
+        return None
+    if kind == "page_id":
+        title = next((plain_text(v.get("title", [])) for v in data.get("properties", {}).values() if v.get("type") == "title"), "")
+    else:
+        title = plain_text(data.get("title", []))
+    return f"{LINK_REFERENCE_PREFIX} [{title or '제목 없음'}]({data.get('url', '')})"
+
 def image_info(b):
     """이미지 블록에서 block_id, 캡션, (만료되는) 현재 URL 추출"""
     img_obj = b.get("image", {})
@@ -245,23 +266,17 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, h
                     prev_sibling_text = text_content
             # 빈 문단(간격용)은 표 제목 판단에 영향을 주지 않는다
 
-        # 2. 데이터베이스 및 뷰 참조 블록 (모든 종류 강제 감지)
-        elif b_type in ["child_database", "link_to_page", "linked_database", "database"]:
-            target_id = b.get("id")
-            db_title = b.get("child_database", {}).get("title", "") if b_type == "child_database" else ""
+        # 2. 문서 안의 DB (원본 DB면 행을 항목으로 펼친다. 뷰는 API가 원본을 알려주지 않아 읽을 수 없다)
+        elif b_type == "child_database":
+            db_text = fetch_database_rows(b.get("id"), b.get("child_database", {}).get("title", ""), token, images)
+            if db_text:
+                full_text_list.append(db_text)
 
-            if b_type in ["link_to_page", "linked_database"]:
-                link_obj = b.get(b_type, {})
-                link_type = link_obj.get("type")
-                if link_type == "database_id":
-                    target_id = link_obj.get("database_id")
-                elif link_type == "page_id":
-                    target_id = link_obj.get("page_id")
-
-            if target_id:
-                db_text = fetch_database_rows(target_id, db_title, token, images)
-                if db_text:
-                    full_text_list.append(db_text)
+        # 2-1. 다른 페이지/DB를 가리키는 링크: 내용은 가져오지 않고 참고 링크로만 남긴다
+        elif b_type == "link_to_page":
+            reference = link_reference(b.get("link_to_page", {}), token)
+            if reference:
+                full_text_list.append(reference)
 
         # 3. 테이블(표) 블록 파싱
         elif b_type == "table":

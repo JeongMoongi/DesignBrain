@@ -94,6 +94,30 @@ def test_images_are_collected_without_url(fake_notion):
                       {"block_id": "img2", "caption": "", "section": "패턴 > Powerbomb"}]
 
 
+def test_page_link_is_kept_as_reference_without_its_content(monkeypatch, fake_notion):
+    # 링크 대상 페이지의 본문은 읽지 않는다 (fake_notion에 'linked' 자식이 있어도 쓰이면 안 됨)
+    fake_notion["linked"] = [text_block("paragraph", "링크 너머의 본문")]
+    fake_notion["page"] = [{"id": "l1", "type": "link_to_page", "has_children": False,
+                            "link_to_page": {"type": "page_id", "page_id": "linked"}}]
+    pages = {"linked": {"properties": {"n": {"type": "title", "title": rt("전투 공식")}}, "url": "https://notion.so/linked"}}
+
+    def fake_get(url, headers, timeout):
+        page_id = url.rsplit("/", 1)[-1]
+        found = page_id in pages
+        return type("R", (), {"status_code": 200 if found else 404, "json": lambda self: pages.get(page_id, {})})()
+    monkeypatch.setattr(np.requests, "get", fake_get)
+
+    out = []
+    np.extract_blocks_recursive("page", "tok", out, [])
+    assert out == [f"{np.LINK_REFERENCE_PREFIX} [전투 공식](https://notion.so/linked)"]
+
+    # 연동에 공유되지 않아 조회할 수 없는 링크는 남기지 않는다
+    fake_notion["page"][0]["link_to_page"]["page_id"] = "private"
+    out = []
+    np.extract_blocks_recursive("page", "tok", out, [])
+    assert out == []
+
+
 def test_database_item_is_single_line(monkeypatch, fake_notion):
     monkeypatch.setattr(np, "query_notion_database", lambda db_id, token: [{
         "id": "r1",

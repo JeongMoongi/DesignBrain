@@ -7,6 +7,7 @@ from qdrant_client.http import exceptions as qdrant_exceptions
 import backlog
 import clients
 import config
+import notion_parser
 import search
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,8 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
         "너는 게임 기획팀의 친근하고 유능한 AI 어시스턴트 '@Brain'이다.\n"
         "제공된 기획서 [컨텍스트] 및 표(Table) 데이터에 기반하여 사용자의 질문에 정확하고 상세하게 답변하라.\n"
         "컨텍스트의 표나 텍스트에 있는 항목명과 수치는 원문 그대로 정확하게 인용하라.\n"
+        f"컨텍스트의 '{notion_parser.LINK_REFERENCE_PREFIX}' 줄은 다른 문서를 가리키는 링크일 뿐 그 문서의 내용이 아니다. "
+        "질문과 관련 있을 때만 '참고 자료로 [제목](주소)도 있어요'처럼 짧게 언급하고, 링크 너머의 내용을 추측하지 마라.\n"
         f"답변의 맨 마지막 줄에는 '{USED_DOCS_LABEL} 제목1 | 제목2' 형식으로, 답변에 실제로 사용한 [참고 문서]의 제목만 적어라. "
         f"사용한 문서가 없으면 '{USED_DOCS_LABEL} 없음'이라고 적어라."
     )
