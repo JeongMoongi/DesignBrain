@@ -69,6 +69,11 @@ def collect_page_images(page_ids, page_images, shared_block_ids, limit):
 def failure_message(stage, reason, hint):
     return f"❌ 답변을 만들지 못했어요.\n• *실패 단계:* {stage}\n• *원인:* {reason}\n{hint}"
 
+def event_thread_ts(event):
+    """스레드 하나를 하나의 대화로 다룬다. 스레드 안의 메세지면 부모 스레드, 아니면 그 메세지로 새 스레드를 시작한다.
+    (스레드 답장을 새 스레드로 잡으면 대화 기록이 비어 후속 질문이 맥락 없이 검색된다)"""
+    return event.get("thread_ts") or event.get("ts")
+
 def process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
     """어떤 단계에서 실패하더라도 사용자가 '분석 중' 메세지만 보고 기다리지 않도록 실패 원인을 스레드에 안내한다"""
     try:
@@ -331,7 +336,7 @@ def init_slack():
     def handle_app_mention_events(body, client, say):
         event = body.get("event", {})
         channel_id = event.get("channel")
-        thread_ts = event.get("thread_ts") or event.get("ts")
+        thread_ts = event_thread_ts(event)
         text = event.get("text", "")
 
         logger.info("📢 [채널 멘션 수신] %s", text)
@@ -352,8 +357,8 @@ def init_slack():
             user_text = event.get("text", "")
             user_id = event.get("user")
             channel_id = event.get("channel")
-            thread_ts = event.get("ts")
-            
+            thread_ts = event_thread_ts(event)
+
             logger.info("💬 [DM 수신] 유저(%s): %s", user_id, user_text)
             request_text = backlog_request_text(user_text)
             if request_text is not None:
