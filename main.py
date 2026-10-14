@@ -34,18 +34,19 @@ def verify_webhook_secret(x_webhook_secret: str = Header(default="")):
         logger.warning("🚫 웹훅 시크릿 불일치로 요청을 거부했습니다.")
         raise HTTPException(status_code=401, detail="invalid webhook secret")
 
+def webhook_page_id(payload):
+    return payload.get("data", {}).get("id") or payload.get("source", {}).get("id")
+
 @app.post("/webhook/notion", dependencies=[Depends(verify_webhook_secret)])
 async def notion_webhook_upsert(request: Request, background_tasks: BackgroundTasks):
-    payload = await request.json()
-    page_id = payload.get("data", {}).get("id") or payload.get("source", {}).get("id")
+    page_id = webhook_page_id(await request.json())
     if page_id: 
         background_tasks.add_task(ai_engine.sync_document_to_db, page_id, config.NOTION_INTEGRATION_TOKEN)
     return {"status": "success"}
 
 @app.post("/webhook/notion/delete", dependencies=[Depends(verify_webhook_secret)])
 async def notion_webhook_delete(request: Request, background_tasks: BackgroundTasks):
-    payload = await request.json()
-    page_id = payload.get("data", {}).get("id") or payload.get("source", {}).get("id")
+    page_id = webhook_page_id(await request.json())
     if page_id: 
         background_tasks.add_task(ai_engine.delete_document_from_db, page_id)
     return {"status": "success"}

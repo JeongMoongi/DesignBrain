@@ -291,7 +291,7 @@ def chunk_item_name(chunk: str) -> str:
     match = ITEM_NAME_PATTERN.search(chunk)
     return match.group(1) if match else ""
 
-def _normalize_name(text: str) -> str:
+def normalize_name(text: str) -> str:
     return re.sub(r"\s+", "", text).lower()
 
 def name_aliases(name: str) -> set:
@@ -300,7 +300,7 @@ def name_aliases(name: str) -> set:
     ' - ' 앞부분은 '패턴 1 - SporeLaunch'의 '패턴 1'처럼 분류명인 경우가 많아 뒷부분만 쓴다."""
     last = re.split(r"\s+-\s+", name)[-1]
     parts = [name, last] + re.split(r"[()（）‘’“”'\"]", last)
-    return {alias for alias in map(_normalize_name, parts) if len(alias) >= 2}
+    return {alias for alias in map(normalize_name, parts) if len(alias) >= 2}
 
 _name_catalog = None
 _name_catalog_lock = threading.Lock()
@@ -340,7 +340,7 @@ def _get_name_catalog() -> Dict[str, set]:
 
 def match_names(query: str, catalog: Dict[str, set]) -> List[tuple]:
     """질문에 들어 있는 이름의 대상 목록. 더 긴 이름에 포함된 짧은 이름('변종 분쇄자' 안의 '분쇄자')은 뺀다."""
-    normalized = _normalize_name(query)
+    normalized = normalize_name(query)
     spans = []
     for alias in catalog:
         start = normalized.find(alias)
@@ -470,6 +470,9 @@ def rewrite_search_query(query: str, chat_history: List[Dict[str, str]]) -> str:
     logger.info("✏️ [검색어 재작성] %s → %s", query, rewritten)
     return rewritten
 
+# 답변 생성 시 함께 넘기는 최근 대화 수 (질문/답변 각각 1개로 센다)
+ANSWER_HISTORY_TURNS = 5
+
 USED_DOCS_LABEL = "사용한 문서:"
 # GPT가 '**사용한 문서:** …'처럼 마크다운으로 꾸미는 경우가 있다. 제목 끝의 따옴표(’) 등은 지우면 안 되므로 마크다운 기호만 뗀다
 MARKDOWN_MARKS = " *_`"
@@ -484,8 +487,8 @@ def split_used_docs(reply: str, search_results: list) -> tuple:
         logger.info("📎 [사용한 문서] 표시가 없어 검색 1위 문서만 참고 문서로 씁니다.")
         top_page = search_results[0].payload.get("page_id")
         return reply, [hit for hit in search_results if hit.payload.get("page_id") == top_page]
-    cited = {_normalize_name(title.strip(MARKDOWN_MARKS)) for title in match.group(1).split("|")}
-    used = [hit for hit in search_results if _normalize_name(hit.payload.get("title", "")) in cited]
+    cited = {normalize_name(title.strip(MARKDOWN_MARKS)) for title in match.group(1).split("|")}
+    used = [hit for hit in search_results if normalize_name(hit.payload.get("title", "")) in cited]
     logger.info("📎 [사용한 문서] %s", match.group(1).strip(MARKDOWN_MARKS))
     return "\n".join(lines[:-1]).rstrip(), used
 
@@ -523,7 +526,7 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
     
     messages = [{"role": "system", "content": system_prompt}]
     
-    for h in chat_history[-5:]:
+    for h in chat_history[-ANSWER_HISTORY_TURNS:]:
         messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
         
     messages.append({"role": "user", "content": f"[컨텍스트]\n{context_str}\n\n[질문]\n{query}"})

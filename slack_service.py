@@ -21,7 +21,6 @@ def format_markdown_for_slack(text: str) -> str:
     text = re.sub(r'\[([^\]]*)\]\((https?://[^\s)]+)\)', r'<\2|🔗 \1>', text)
     text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
     text = text.replace("- 참고 문서 :", "• *참고 문서:*")
-    text = text.replace("- 참고 문서:", "• *참고 문서:*")
     return text.strip()
 
 # 답변 메세지의 메타데이터에 남기는 정보 (사용자에게는 보이지 않는다)

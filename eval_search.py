@@ -60,7 +60,7 @@ def check_answer(case):
     problems = [f"참고 문서에 없음: {d}" for d in case["docs"] if d not in cited]
     if not case["docs"] and cited:
         problems.append("범위 밖 질문인데 참고 문서가 붙음")
-    normalized_body = ai_engine._normalize_name(body)
+    normalized_body = ai_engine.normalize_name(body)
     problems += [f"답변에 언급 없음: {i}" for i in case.get("items", [])
                  if not any(alias in normalized_body for alias in ai_engine.name_aliases(i))]
     detail = f"참고 문서: {', '.join(cited) or '없음'}"
