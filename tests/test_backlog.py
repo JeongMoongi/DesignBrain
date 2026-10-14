@@ -2,6 +2,8 @@ import math
 from datetime import datetime
 import pytest
 import ai_engine
+import clients
+import indexing
 import backlog
 import config
 import slack_service
@@ -22,7 +24,7 @@ QUERY = vector_at(1.0)
 def store(local_db, monkeypatch, no_network):
     """백로그 내용 문자열 -> 유사도를 정해 두고, OpenAI 없이 등록한다"""
     scores = {}
-    monkeypatch.setattr(ai_engine, "get_embedding", lambda text: vector_at(scores.get(text, 0.0)))
+    monkeypatch.setattr(clients, "get_embedding", lambda text: vector_at(scores.get(text, 0.0)))
     monkeypatch.setattr(backlog, "write_note", lambda name, content: f"{name or '팀원'} 님이 {content} 확인하셨습니다.")
 
     def add(content, score, assignee="UASSIGNEE", page_ids=()):
@@ -83,15 +85,15 @@ def test_open_by_assignee_groups_open_items(store):
 
 def test_backlog_survives_document_resync_and_delete(store, local_db):
     store("기획서와 무관하게 남아야 함", 0.5, page_ids=["P1"])
-    ai_engine.delete_document_from_db("P1")
+    indexing.delete_document_from_db("P1")
     assert len(backlog.open_by_assignee()["UASSIGNEE"]) == 1
 
 
 def test_answer_gets_notes_appended(monkeypatch):
     found = hit({"text": "본문", "title": "문서", "url": "https://notion/p", "page_id": "P1"})
-    monkeypatch.setattr(ai_engine, "get_embedding", lambda q: QUERY)
-    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant([found]))
-    monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai("답변"))
+    monkeypatch.setattr(clients, "get_embedding", lambda q: QUERY)
+    monkeypatch.setattr(clients, "get_qdrant", lambda: FakeQdrant([found]))
+    monkeypatch.setattr(clients, "get_openai", lambda: fake_openai("답변"))
     monkeypatch.setattr(backlog, "notes_for_answer", lambda vec, pages: ["정문기 님이 A를 확인하셨습니다."] if pages == ["P1"] else [])
     answer = ai_engine.ask_ai_with_history("질문", [])["AI_답변"]
     assert answer.startswith("답변\n\n📌 참고 : 정문기 님이 A를 확인하셨습니다.")
@@ -101,9 +103,9 @@ def test_answer_gets_notes_appended(monkeypatch):
 def test_answer_survives_backlog_failure(monkeypatch):
     monkeypatch.setattr(backlog, "notes_for_answer", raiser(RuntimeError("backlog down")))
     found = hit({"text": "본문", "title": "문서", "url": "", "page_id": "P1"})
-    monkeypatch.setattr(ai_engine, "get_embedding", lambda q: QUERY)
-    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant([found]))
-    monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai("답변"))
+    monkeypatch.setattr(clients, "get_embedding", lambda q: QUERY)
+    monkeypatch.setattr(clients, "get_qdrant", lambda: FakeQdrant([found]))
+    monkeypatch.setattr(clients, "get_openai", lambda: fake_openai("답변"))
     result = ai_engine.ask_ai_with_history("질문", [])
     assert result["status"] == "success" and result["AI_답변"] == "답변"
 
@@ -116,7 +118,7 @@ CONTENT = "보스의 슈퍼아머 파괴 연출 도중 쉐이더 이펙트를 �
 
 
 def test_write_note_uses_generated_sentence(monkeypatch):
-    monkeypatch.setattr(ai_engine, "get_openai", fake_note_openai(
+    monkeypatch.setattr(clients, "get_openai", fake_note_openai(
         "보스의 슈퍼아머 파괴 연출 도중 쉐이더 이펙트를 쓰기로 했는데 챕터 3 기획서에 반영되지 않은 것을 확인하셨습니다."))
     assert backlog.write_note("정문기", CONTENT).startswith("정문기 님이 보스의 슈퍼아머")
 
@@ -127,14 +129,14 @@ def test_write_note_uses_generated_sentence(monkeypatch):
     "보스의 슈퍼아머 파괴 연출 도중 쉐이더 이펙트를 쓰기로 했는데 챕터 3 기획서에 반영되지 않았습니다.",  # 형식 틀림
 ])
 def test_write_note_rejects_bad_sentences(monkeypatch, body):
-    monkeypatch.setattr(ai_engine, "get_openai", fake_note_openai(body))
+    monkeypatch.setattr(clients, "get_openai", fake_note_openai(body))
     assert backlog.write_note("정문기", CONTENT) == f"정문기 님이 남긴 메모: {CONTENT}"
 
 
 def test_write_note_falls_back_when_openai_fails(monkeypatch):
     def broken():
         raise RuntimeError("no openai")
-    monkeypatch.setattr(ai_engine, "get_openai", broken)
+    monkeypatch.setattr(clients, "get_openai", broken)
     assert backlog.write_note("정문기", "쉐이더 미반영") == "정문기 님이 남긴 메모: 쉐이더 미반영"
     assert backlog.write_note(None, "쉐이더 미반영") == "팀원이 남긴 메모: 쉐이더 미반영"
 

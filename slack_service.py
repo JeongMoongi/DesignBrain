@@ -137,7 +137,7 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
         return
 
     # '분석 중' 메세지를 답변(또는 실패 안내)으로 바꿔, 스레드에 답변당 메세지 하나만 남긴다
-    placeholder = say(text=f"🤔 기획서를 읽고 분석 중입니다...", thread_ts=thread_ts)
+    placeholder = say(text="🤔 기획서를 읽고 분석 중입니다...", thread_ts=thread_ts)
     placeholder_ts = sent["placeholder_ts"] = placeholder["ts"]
 
     res = ai_engine.ask_ai_with_history(final_query, chat_history)

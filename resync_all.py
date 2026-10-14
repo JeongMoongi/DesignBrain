@@ -8,16 +8,17 @@
 import logging
 import sys
 import config
-import ai_engine
+import clients
+import indexing
 
 logger = logging.getLogger("resync_all")
 
 
 def indexed_page_ids():
-    client = ai_engine.get_qdrant()
+    client = clients.get_qdrant()
     page_ids, offset = set(), None
     while True:
-        points, offset = client.scroll(ai_engine.COLLECTION_NAME, limit=256, offset=offset, with_payload=["page_id"])
+        points, offset = client.scroll(config.COLLECTION_NAME, limit=256, offset=offset, with_payload=["page_id"])
         page_ids.update(p.payload["page_id"] for p in points if p.payload.get("page_id"))
         if offset is None:
             return sorted(page_ids)
@@ -25,27 +26,27 @@ def indexed_page_ids():
 
 def main(page_ids):
     page_ids = page_ids or indexed_page_ids()
-    client = ai_engine.get_qdrant()
-    before = client.count(ai_engine.COLLECTION_NAME, exact=True).count
+    client = clients.get_qdrant()
+    before = client.count(config.COLLECTION_NAME, exact=True).count
     logger.info("재동기화 시작: 문서 %d개 (현재 청크 %d개)", len(page_ids), before)
 
     skipped, failed = [], []
     for i, page_id in enumerate(page_ids, 1):
         try:
-            if not ai_engine.sync_document_to_db(page_id, config.NOTION_INTEGRATION_TOKEN):
+            if not indexing.sync_document_to_db(page_id, config.NOTION_INTEGRATION_TOKEN):
                 skipped.append(page_id)
         except Exception as e:
             logger.exception("동기화 실패: %s", page_id)
             failed.append((page_id, e))
         logger.info("진행 %d/%d", i, len(page_ids))
 
-    after = client.count(ai_engine.COLLECTION_NAME, exact=True).count
+    after = client.count(config.COLLECTION_NAME, exact=True).count
     logger.info("재동기화 완료: 청크 %d개 -> %d개, 저장 안 함(휴지통/빈 문서) %d개, 실패 %d개", before, after, len(skipped), len(failed))
     for page_id in skipped:
         logger.info("  저장 안 함: %s", page_id)
     for page_id, e in failed:
         logger.error("  실패: %s (%s)", page_id, e)
-    ai_engine.close_clients()
+    clients.close_clients()
     return 1 if failed else 0
 
 

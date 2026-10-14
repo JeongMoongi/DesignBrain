@@ -1,17 +1,17 @@
 import pytest
-import ai_engine
+import clients
 import config
 
 
 @pytest.fixture
 def local_db(tmp_path, monkeypatch):
     """테스트마다 새 로컬 Qdrant를 쓰고, 끝나면 닫는다 (실제 클라우드 DB에는 절대 연결하지 않음)"""
-    ai_engine.close_clients()
+    clients.close_clients()
     monkeypatch.setattr(config, "QDRANT_URL", None)
     monkeypatch.setattr(config, "QDRANT_LOCAL_PATH", str(tmp_path / "qdrant"))
-    client = ai_engine.get_qdrant()
+    client = clients.get_qdrant()
     yield client
-    ai_engine.close_clients()
+    clients.close_clients()
 
 
 @pytest.fixture
@@ -24,4 +24,4 @@ def no_network(monkeypatch):
 
     monkeypatch.setattr(requests, "get", blocked)
     monkeypatch.setattr(requests, "post", blocked)
-    monkeypatch.setattr(ai_engine, "get_embeddings", blocked)
+    monkeypatch.setattr(clients, "get_embeddings", blocked)

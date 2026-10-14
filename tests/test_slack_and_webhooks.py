@@ -1,6 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
 import ai_engine
+import clients
+import indexing
 import config
 import main
 import slack_service
@@ -187,10 +189,10 @@ def app_client(monkeypatch):
     calls = []
     monkeypatch.setattr(slack_service, "start_slack_bot", lambda: None)
     monkeypatch.setattr(slack_service, "stop_slack_bot", lambda: None)
-    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: None)
-    monkeypatch.setattr(ai_engine, "close_clients", lambda: None)
-    monkeypatch.setattr(ai_engine, "sync_document_to_db", lambda pid, tok: calls.append(("sync", pid)))
-    monkeypatch.setattr(ai_engine, "delete_document_from_db", lambda pid: calls.append(("delete", pid)))
+    monkeypatch.setattr(clients, "get_qdrant", lambda: None)
+    monkeypatch.setattr(clients, "close_clients", lambda: None)
+    monkeypatch.setattr(indexing, "sync_document_to_db", lambda pid, tok: calls.append(("sync", pid)))
+    monkeypatch.setattr(indexing, "delete_document_from_db", lambda pid: calls.append(("delete", pid)))
     with TestClient(main.app) as client:
         yield client, calls
 

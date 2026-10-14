@@ -3,6 +3,8 @@ import openai
 import pytest
 from qdrant_client.http import exceptions as qe
 import ai_engine
+import clients
+import search
 import slack_service
 from fakes import FakeQdrant, fake_openai, hit, raiser
 
@@ -42,7 +44,7 @@ HIT = hit({"text": "본문", "title": "문서", "url": "https://notion/p", "page
 ])
 def test_answer_failure_reports_stage(monkeypatch, stage, patch):
     for name, value in patch.items():
-        monkeypatch.setattr(ai_engine, name, value)
+        monkeypatch.setattr(clients, name, value)
     result = ai_engine.ask_ai_with_history("질문", [])
     assert result["status"] == "error"
     assert result["stage"] == stage
@@ -50,9 +52,9 @@ def test_answer_failure_reports_stage(monkeypatch, stage, patch):
 
 
 def test_answer_success_appends_source(monkeypatch):
-    monkeypatch.setattr(ai_engine, "get_embedding", lambda q: [0.0])
-    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant([HIT]))
-    monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai(reply="답변"))
+    monkeypatch.setattr(clients, "get_embedding", lambda q: [0.0])
+    monkeypatch.setattr(clients, "get_qdrant", lambda: FakeQdrant([HIT]))
+    monkeypatch.setattr(clients, "get_openai", lambda: fake_openai(reply="답변"))
     result = ai_engine.ask_ai_with_history("질문", [])
     assert result["status"] == "success"
     assert result["AI_답변"].startswith("답변")
@@ -65,15 +67,15 @@ HISTORY = [{"role": "user", "content": "디고리 체력이 얼마야?"}, {"role
 
 def test_first_question_is_searched_as_is(monkeypatch):
     # 스레드 첫 질문은 재작성 호출 없이 그대로 검색한다
-    monkeypatch.setattr(ai_engine, "get_openai", raiser(AssertionError("재작성을 호출하면 안 됩니다")))
-    assert ai_engine.rewrite_search_query("디고리 체력이 얼마야?", []) == "디고리 체력이 얼마야?"
+    monkeypatch.setattr(clients, "get_openai", raiser(AssertionError("재작성을 호출하면 안 됩니다")))
+    assert search.rewrite_search_query("디고리 체력이 얼마야?", []) == "디고리 체력이 얼마야?"
 
 
 def test_follow_up_is_searched_with_rewritten_query(monkeypatch):
     embedded = []
-    monkeypatch.setattr(ai_engine, "get_embedding", lambda q: embedded.append(q) or [0.0])
-    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant([HIT]))
-    monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai(reply="디고리의 공격 패턴은 어떻게 돼?"))
+    monkeypatch.setattr(clients, "get_embedding", lambda q: embedded.append(q) or [0.0])
+    monkeypatch.setattr(clients, "get_qdrant", lambda: FakeQdrant([HIT]))
+    monkeypatch.setattr(clients, "get_openai", lambda: fake_openai(reply="디고리의 공격 패턴은 어떻게 돼?"))
     result = ai_engine.ask_ai_with_history("공격 패턴은 어떻게 돼?", HISTORY)
     assert result["status"] == "success"
     assert embedded == ["디고리의 공격 패턴은 어떻게 돼?"]
@@ -84,8 +86,8 @@ def test_follow_up_is_searched_with_rewritten_query(monkeypatch):
     lambda: fake_openai(reply="  "),
 ])
 def test_rewrite_failure_falls_back_to_original_query(monkeypatch, openai_client):
-    monkeypatch.setattr(ai_engine, "get_openai", openai_client)
-    assert ai_engine.rewrite_search_query("공격 패턴은?", HISTORY) == "공격 패턴은?"
+    monkeypatch.setattr(clients, "get_openai", openai_client)
+    assert search.rewrite_search_query("공격 패턴은?", HISTORY) == "공격 패턴은?"
 
 
 class FakeSlack:

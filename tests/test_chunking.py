@@ -1,9 +1,9 @@
-import ai_engine
+import indexing
 import notion_parser as np
 
 
 def chunks(text, title="몹"):
-    return ai_engine.split_into_chunks(title, text)
+    return indexing.split_into_chunks(title, text)
 
 
 def test_plain_text_is_grouped_up_to_limit():
@@ -11,7 +11,7 @@ def test_plain_text_is_grouped_up_to_limit():
     result = chunks("\n\n".join(lines))
     assert len(result) > 1
     assert all(c.startswith("문서: 몹\n") for c in result)
-    assert all(len(c) <= ai_engine.TEXT_CHUNK_CHARS + 50 for c in result)
+    assert all(len(c) <= indexing.TEXT_CHUNK_CHARS + 50 for c in result)
     # 내용 누락 없음
     assert all(any(line in c for c in result) for line in lines)
 
@@ -49,22 +49,22 @@ def test_pipe_in_plain_text_does_not_split_it():
 
 def test_long_unit_is_split_with_item_name_repeated():
     unit = "- 항목: [긴항목] ➔ " + " / ".join(f"문장{i} " + "가" * 300 for i in range(10))
-    pieces = ai_engine.split_long_unit(unit)
+    pieces = indexing.split_long_unit(unit)
     assert len(pieces) > 1
-    assert all(len(p) <= ai_engine.MAX_UNIT_CHARS for p in pieces)
+    assert all(len(p) <= indexing.MAX_UNIT_CHARS for p in pieces)
     assert all(p.startswith("- 항목: [긴항목]") for p in pieces)
 
 
 def test_unit_with_one_huge_part_is_still_bounded():
-    pieces = ai_engine.split_long_unit("가" * 5000)
-    assert all(len(p) <= ai_engine.MAX_UNIT_CHARS for p in pieces)
+    pieces = indexing.split_long_unit("가" * 5000)
+    assert all(len(p) <= indexing.MAX_UNIT_CHARS for p in pieces)
     assert "".join(pieces) == "가" * 5000
 
 
 def test_short_unit_is_untouched():
-    assert ai_engine.split_long_unit("- 항목: [a] ➔ b") == ["- 항목: [a] ➔ b"]
+    assert indexing.split_long_unit("- 항목: [a] ➔ b") == ["- 항목: [a] ➔ b"]
 
 
 def test_chunk_point_id_is_stable():
-    assert ai_engine.chunk_point_id("page", 3) == ai_engine.chunk_point_id("page", 3)
-    assert ai_engine.chunk_point_id("page", 3) != ai_engine.chunk_point_id("page", 4)
+    assert indexing.chunk_point_id("page", 3) == indexing.chunk_point_id("page", 3)
+    assert indexing.chunk_point_id("page", 3) != indexing.chunk_point_id("page", 4)

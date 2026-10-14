@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct
-import ai_engine
+import clients
 import config
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ def linked_docs(page_ids: List[str]) -> List[Dict[str, str]]:
     """인덱스에 있는 문서만 골라 제목/URL과 함께 돌려준다 (링크는 있지만 인덱싱되지 않은 문서는 제외)"""
     docs = []
     for page_id in page_ids:
-        points = ai_engine.get_qdrant().scroll(
+        points = clients.get_qdrant().scroll(
             collection_name=config.COLLECTION_NAME, limit=1, with_payload=["title", "url"],
             scroll_filter=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]),
         )[0]
@@ -95,7 +95,7 @@ def write_note(reporter_name: Optional[str], content: str) -> str:
         messages += [{"role": "user", "content": memo}, {"role": "assistant", "content": sentence}]
     messages.append({"role": "user", "content": content})
     try:
-        completion = ai_engine.get_openai().chat.completions.create(model=config.CHAT_MODEL, temperature=0, messages=messages)
+        completion = clients.get_openai().chat.completions.create(model=config.CHAT_MODEL, temperature=0, messages=messages)
         body = completion.choices[0].message.content.strip()
     except Exception as e:
         logger.warning("백로그 참고 문구 생성 실패, 기본 문구 사용: %s", e)
@@ -124,8 +124,8 @@ def add(reporter_id: str, reporter_name: Optional[str], assignee_id: str, assign
         "created_at": datetime.now(KST).isoformat(),  # 같은 초에 등록돼도 순서가 유지되도록 마이크로초까지
         "source": source,
     }
-    vector = ai_engine.get_embedding(content)
-    ai_engine.get_qdrant().upsert(collection_name=config.BACKLOG_COLLECTION,
+    vector = clients.get_embedding(content)
+    clients.get_qdrant().upsert(collection_name=config.BACKLOG_COLLECTION,
                                   points=[PointStruct(id=backlog_id, vector=vector, payload=record)])
     logger.info("📝 [백로그 등록] %s | 담당자: %s | 기획서: %s", content, assignee_id, [d["title"] for d in docs])
     return record
@@ -133,7 +133,7 @@ def add(reporter_id: str, reporter_name: Optional[str], assignee_id: str, assign
 
 def notes_for_answer(query_vector: List[float], answer_page_ids: List[str]) -> List[str]:
     """답변에 덧붙일 미해결 백로그 참고 문구 (관련도 높은 순)"""
-    hits = ai_engine.get_qdrant().query_points(
+    hits = clients.get_qdrant().query_points(
         collection_name=config.BACKLOG_COLLECTION, query=query_vector, limit=10, with_payload=True,
         query_filter=Filter(must=[FieldCondition(key="status", match=MatchValue(value=OPEN))]),
     ).points
@@ -149,7 +149,7 @@ def notes_for_answer(query_vector: List[float], answer_page_ids: List[str]) -> L
 
 
 def get(backlog_id: str) -> Optional[Dict]:
-    points = ai_engine.get_qdrant().retrieve(collection_name=config.BACKLOG_COLLECTION, ids=[backlog_id], with_payload=True)
+    points = clients.get_qdrant().retrieve(collection_name=config.BACKLOG_COLLECTION, ids=[backlog_id], with_payload=True)
     return points[0].payload if points else None
 
 
@@ -157,7 +157,7 @@ def open_by_assignee() -> Dict[str, List[Dict]]:
     """담당자 ID별 미해결 백로그 (오래된 순)"""
     grouped, offset = {}, None
     while True:
-        points, offset = ai_engine.get_qdrant().scroll(
+        points, offset = clients.get_qdrant().scroll(
             collection_name=config.BACKLOG_COLLECTION, limit=256, offset=offset, with_payload=True,
             scroll_filter=Filter(must=[FieldCondition(key="status", match=MatchValue(value=OPEN))]),
         )
@@ -179,7 +179,7 @@ def resolve(backlog_id: str, user_id: str) -> str:
         return "not_assignee"
     if record["status"] == RESOLVED:
         return "already"
-    ai_engine.get_qdrant().set_payload(
+    clients.get_qdrant().set_payload(
         collection_name=config.BACKLOG_COLLECTION, points=[backlog_id],
         payload={"status": RESOLVED, "resolved_at": datetime.now(KST).isoformat(timespec="seconds"), "resolved_by": user_id},
     )

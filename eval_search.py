@@ -13,6 +13,8 @@ import re
 import sys
 from collections import defaultdict
 import ai_engine
+import clients
+import search
 
 CASES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval", "search_cases.json")
 LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(https?://[^)]+\)")
@@ -32,8 +34,8 @@ def chat_history(case):
 
 def check_search(case):
     """답변 생성 직전까지(재작성 → 검색)만 실행해 GPT에 넘어갈 검색 결과를 확인한다"""
-    search_query = ai_engine.rewrite_search_query(case["question"], chat_history(case))
-    results, _ = ai_engine.search_chunks(search_query, ai_engine.get_embedding(search_query))
+    search_query = search.rewrite_search_query(case["question"], chat_history(case))
+    results, _ = search.search_chunks(search_query, clients.get_embedding(search_query))
     titles = list(dict.fromkeys(hit.payload.get("title") for hit in results))
     items = {hit.payload.get("item") for hit in results}
 
@@ -60,9 +62,9 @@ def check_answer(case):
     problems = [f"참고 문서에 없음: {d}" for d in case["docs"] if d not in cited]
     if not case["docs"] and cited:
         problems.append("범위 밖 질문인데 참고 문서가 붙음")
-    normalized_body = ai_engine.normalize_name(body)
+    normalized_body = search.normalize_name(body)
     problems += [f"답변에 언급 없음: {i}" for i in case.get("items", [])
-                 if not any(alias in normalized_body for alias in ai_engine.name_aliases(i))]
+                 if not any(alias in normalized_body for alias in search.name_aliases(i))]
     detail = f"참고 문서: {', '.join(cited) or '없음'}"
     return problems, detail, len(extra)
 
@@ -106,7 +108,7 @@ def main(args):
     print(f"  전체: {sum(passed.values())}/{sum(total.values())}")
     if answer_mode:
         print(f"  기대 외 참고 문서 링크: {extra_links}개 (질문 {cited_cases}개)")
-    ai_engine.close_clients()
+    clients.close_clients()
     return 0
 
 
