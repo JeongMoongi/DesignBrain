@@ -5,6 +5,7 @@ import ai_engine
 import backlog
 import config
 import slack_service
+from fakes import FakeQdrant, fake_openai, hit, raiser
 
 DIM = config.EMBEDDING_DIM
 
@@ -87,20 +88,10 @@ def test_backlog_survives_document_resync_and_delete(store, local_db):
 
 
 def test_answer_gets_notes_appended(monkeypatch):
-    class Hit:
-        id = "hit"
-        score = 0.9
-        payload = {"text": "본문", "title": "문서", "url": "https://notion/p", "page_id": "P1"}
-
-    class FakeQdrant:
-        def query_points(self, **kwargs):
-            return type("R", (), {"points": [Hit()]})()
-
-    reply = type("C", (), {"choices": [type("Ch", (), {"message": type("M", (), {"content": "답변"})()})()]})()
-    fake_openai = type("O", (), {"chat": type("Chat", (), {"completions": type("Comp", (), {"create": staticmethod(lambda **kw: reply)})})})
+    found = hit({"text": "본문", "title": "문서", "url": "https://notion/p", "page_id": "P1"})
     monkeypatch.setattr(ai_engine, "get_embedding", lambda q: QUERY)
-    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant())
-    monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai)
+    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant([found]))
+    monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai("답변"))
     monkeypatch.setattr(backlog, "notes_for_answer", lambda vec, pages: ["정문기 님이 A를 확인하셨습니다."] if pages == ["P1"] else [])
     answer = ai_engine.ask_ai_with_history("질문", [])["AI_답변"]
     assert answer.startswith("답변\n\n📌 참고 : 정문기 님이 A를 확인하셨습니다.")
@@ -108,25 +99,17 @@ def test_answer_gets_notes_appended(monkeypatch):
 
 
 def test_answer_survives_backlog_failure(monkeypatch):
-    def boom(*args):
-        raise RuntimeError("backlog down")
-    monkeypatch.setattr(backlog, "notes_for_answer", boom)
-
-    class Hit:
-        id = "hit"
-        score = 0.9
-        payload = {"text": "본문", "title": "문서", "url": "", "page_id": "P1"}
+    monkeypatch.setattr(backlog, "notes_for_answer", raiser(RuntimeError("backlog down")))
+    found = hit({"text": "본문", "title": "문서", "url": "", "page_id": "P1"})
     monkeypatch.setattr(ai_engine, "get_embedding", lambda q: QUERY)
-    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: type("Q", (), {"query_points": lambda self, **kw: type("R", (), {"points": [Hit()]})()})())
-    reply = type("C", (), {"choices": [type("Ch", (), {"message": type("M", (), {"content": "답변"})()})()]})()
-    monkeypatch.setattr(ai_engine, "get_openai", lambda: type("O", (), {"chat": type("Chat", (), {"completions": type("Comp", (), {"create": staticmethod(lambda **kw: reply)})})}))
+    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant([found]))
+    monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai("답변"))
     result = ai_engine.ask_ai_with_history("질문", [])
     assert result["status"] == "success" and result["AI_답변"] == "답변"
 
 
 def fake_note_openai(body):
-    reply = type("C", (), {"choices": [type("Ch", (), {"message": type("M", (), {"content": body})()})()]})()
-    return lambda: type("O", (), {"chat": type("Chat", (), {"completions": type("Comp", (), {"create": staticmethod(lambda **kw: reply)})})})
+    return lambda: fake_openai(body)
 
 
 CONTENT = "보스의 슈퍼아머 파괴 연출 도중 쉐이더 이펙트를 쓰기로 했는데 챕터 3 기획서에 반영되지 않은 것을 발견함"

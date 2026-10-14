@@ -4,6 +4,7 @@ import pytest
 from qdrant_client.http import exceptions as qe
 import ai_engine
 import slack_service
+from fakes import FakeQdrant, fake_openai, hit, raiser
 
 REQ = httpx.Request("POST", "https://api.openai.com/v1/x")
 
@@ -30,37 +31,13 @@ def test_describe_failure(error, reason_part, hint):
     assert failure["hint"] == hint
 
 
-def raiser(error):
-    def raise_it(*args, **kwargs):
-        raise error
-    return raise_it
-
-
-class Hit:
-    id = "hit"
-    score = 0.9
-    payload = {"text": "본문", "title": "문서", "url": "https://notion/p", "page_id": "p", "images": []}
-
-
-class FakeQdrant:
-    def __init__(self, error=None):
-        self.error = error
-
-    def query_points(self, **kwargs):
-        if self.error:
-            raise self.error
-        return type("Response", (), {"points": [Hit()]})()
-
-
-def fake_openai(reply=None, error=None):
-    create = raiser(error) if error else (lambda **kw: type("C", (), {"choices": [type("Ch", (), {"message": type("M", (), {"content": reply})()})()]})())
-    return type("OpenAI", (), {"chat": type("Chat", (), {"completions": type("Comp", (), {"create": staticmethod(create)})})})
+HIT = hit({"text": "본문", "title": "문서", "url": "https://notion/p", "page_id": "p", "images": []})
 
 
 @pytest.mark.parametrize("stage,patch", [
     ("질문 분석", {"get_embedding": raiser(openai.APIConnectionError(request=REQ))}),
-    ("기획서 검색", {"get_embedding": lambda q: [0.0], "get_qdrant": lambda: FakeQdrant(qe.ResponseHandlingException(Exception()))}),
-    ("답변 생성", {"get_embedding": lambda q: [0.0], "get_qdrant": lambda: FakeQdrant(),
+    ("기획서 검색", {"get_embedding": lambda q: [0.0], "get_qdrant": lambda: FakeQdrant(error=qe.ResponseHandlingException(Exception()))}),
+    ("답변 생성", {"get_embedding": lambda q: [0.0], "get_qdrant": lambda: FakeQdrant([HIT]),
                 "get_openai": lambda: fake_openai(error=openai.APITimeoutError(request=REQ))}),
 ])
 def test_answer_failure_reports_stage(monkeypatch, stage, patch):
@@ -74,7 +51,7 @@ def test_answer_failure_reports_stage(monkeypatch, stage, patch):
 
 def test_answer_success_appends_source(monkeypatch):
     monkeypatch.setattr(ai_engine, "get_embedding", lambda q: [0.0])
-    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant())
+    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant([HIT]))
     monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai(reply="답변"))
     result = ai_engine.ask_ai_with_history("질문", [])
     assert result["status"] == "success"
@@ -95,7 +72,7 @@ def test_first_question_is_searched_as_is(monkeypatch):
 def test_follow_up_is_searched_with_rewritten_query(monkeypatch):
     embedded = []
     monkeypatch.setattr(ai_engine, "get_embedding", lambda q: embedded.append(q) or [0.0])
-    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant())
+    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant([HIT]))
     monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai(reply="디고리의 공격 패턴은 어떻게 돼?"))
     result = ai_engine.ask_ai_with_history("공격 패턴은 어떻게 돼?", HISTORY)
     assert result["status"] == "success"

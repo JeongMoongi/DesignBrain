@@ -2,6 +2,7 @@ import pytest
 from qdrant_client.models import PointStruct
 import ai_engine
 import config
+from fakes import fake_openai
 
 
 @pytest.mark.parametrize("img,expected", [
@@ -71,13 +72,7 @@ def test_answer_uses_images_of_named_item_and_ranked_links(local_db, monkeypatch
     ])
     monkeypatch.setattr(ai_engine, "get_embedding", lambda q: vec(1.0, 0.0))
     monkeypatch.setattr(ai_engine.backlog, "notes_for_answer", lambda vector, page_ids: [])
-
-    class Completions:
-        @staticmethod
-        def create(**kwargs):
-            reply = "답변\n사용한 문서: 챕터 1 몹 | 파트너 특성 시스템"
-            return type("C", (), {"choices": [type("Ch", (), {"message": type("M", (), {"content": reply})()})()]})()
-    monkeypatch.setattr(ai_engine, "get_openai", lambda: type("O", (), {"chat": type("Chat", (), {"completions": Completions})}))
+    monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai("답변\n사용한 문서: 챕터 1 몹 | 파트너 특성 시스템"))
 
     result = ai_engine.ask_ai_with_history("석화체 알려줘", [])
     # 유사도로 채운 '파트너 특성 시스템'의 도판은 쓰지 않는다
