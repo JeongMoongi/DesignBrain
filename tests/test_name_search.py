@@ -3,9 +3,9 @@ from qdrant_client.models import PointStruct
 import ai_engine
 import backlog
 import clients
+import config
 import indexing
 import search
-import config
 from fakes import fake_openai
 
 

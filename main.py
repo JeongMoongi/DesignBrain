@@ -6,7 +6,7 @@ import threading
 import config
 import clients
 import indexing
-import slack_service
+import slack_bot
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +18,10 @@ async def lifespan(app: FastAPI):
     # 슬랙 스레드와 웹훅이 쓰기 전에 DB 연결/컬렉션 준비를 마친다
     clients.get_qdrant()
     # 슬랙 소켓 모드는 별도 스레드로 실행하여 FastAPI 웹서버 차단을 방지합니다.
-    slack_thread = threading.Thread(target=slack_service.start_slack_bot, daemon=True)
+    slack_thread = threading.Thread(target=slack_bot.start_slack_bot, daemon=True)
     slack_thread.start()
     yield
-    slack_service.stop_slack_bot()
+    slack_bot.stop_slack_bot()
     clients.close_clients()
 
 app = FastAPI(lifespan=lifespan)

@@ -1,10 +1,12 @@
 import pytest
 from fastapi.testclient import TestClient
 import ai_engine
+import backlog_slack
 import clients
-import indexing
 import config
+import indexing
 import main
+import slack_bot
 import slack_service
 
 
@@ -177,7 +179,7 @@ def test_backlog_links_docs_of_previous_answer(monkeypatch, answer, expected):
     monkeypatch.setattr(slack_service.backlog, "linked_docs", lambda page_ids: page_ids)
     slack = HistorySlack([{"ts": "1", "user": "U", "text": "질문"}, {"ts": "2", "bot_id": "B", **answer},
                           {"ts": "3", "user": "U", "text": "백로그 <@U2> 내용"}])
-    assert slack_service.docs_answered_in_thread(slack, "D1", "1", "3") == expected
+    assert backlog_slack.docs_answered_in_thread(slack, "D1", "1", "3") == expected
 
 
 def test_top_level_message_starts_new_thread():
@@ -187,8 +189,8 @@ def test_top_level_message_starts_new_thread():
 @pytest.fixture
 def app_client(monkeypatch):
     calls = []
-    monkeypatch.setattr(slack_service, "start_slack_bot", lambda: None)
-    monkeypatch.setattr(slack_service, "stop_slack_bot", lambda: None)
+    monkeypatch.setattr(slack_bot, "start_slack_bot", lambda: None)
+    monkeypatch.setattr(slack_bot, "stop_slack_bot", lambda: None)
     monkeypatch.setattr(clients, "get_qdrant", lambda: None)
     monkeypatch.setattr(clients, "close_clients", lambda: None)
     monkeypatch.setattr(indexing, "sync_document_to_db", lambda pid, tok: calls.append(("sync", pid)))

@@ -2,11 +2,11 @@ import math
 from datetime import datetime
 import pytest
 import ai_engine
-import clients
-import indexing
 import backlog
+import backlog_slack
+import clients
 import config
-import slack_service
+import indexing
 from fakes import FakeQdrant, fake_openai, hit, raiser
 
 DIM = config.EMBEDDING_DIM
@@ -159,7 +159,7 @@ def test_seconds_until_next(now, expected_hours):
     ("<@UBOT> 백로그", ""),
 ])
 def test_backlog_request_text(text, expected):
-    assert slack_service.backlog_request_text(text) == expected
+    assert backlog_slack.backlog_request_text(text) == expected
 
 
 class FakeSlack:
@@ -187,7 +187,7 @@ class FakeSlack:
 
 
 def test_mention_in_answer_thread_links_answered_docs(monkeypatch):
-    slack_service._user_names.clear()
+    backlog_slack._user_names.clear()
     captured = {}
     monkeypatch.setattr(backlog, "linked_docs", lambda ids: [{"page_id": i, "title": "보스 기획서", "url": "https://n/p"} for i in ids])
     monkeypatch.setattr(backlog, "add", lambda **kw: captured.update(kw) or {**kw, "note": "정문기 님이 … 확인하셨습니다."})
@@ -199,25 +199,25 @@ def test_mention_in_answer_thread_links_answered_docs(monkeypatch):
     client = FakeSlack(thread, names={"UREPORTER": "정문기"})
     said = []
     event = {"channel": "C1", "thread_ts": "1.0", "ts": "3.0", "user": "UREPORTER", "text": thread[-1]["text"]}
-    slack_service.handle_backlog_mention(client, lambda text, thread_ts=None: said.append((text, thread_ts)), event,
-                                         slack_service.backlog_request_text(event["text"]))
+    backlog_slack.handle_backlog_mention(client, lambda text, thread_ts=None: said.append((text, thread_ts)), event,
+                                         backlog_slack.backlog_request_text(event["text"]))
     assert captured["assignee_id"] == "UASSIGNEE" and captured["content"] == "쉐이더 미반영"
     assert captured["reporter_name"] == "정문기" and captured["assignee_name"] is None
     assert [d["page_id"] for d in captured["docs"]] == ["371107d6-982c-8094-8620-e95820d7fa8e"]
     text, thread_ts = said[-1]
-    assert thread_ts == "1.0" and text.startswith(slack_service.BACKLOG_CONFIRM_PREFIX) and "보스 기획서" in text
+    assert thread_ts == "1.0" and text.startswith(backlog.BACKLOG_CONFIRM_PREFIX) and "보스 기획서" in text
 
 
 def test_bad_backlog_command_shows_usage():
     said = []
-    slack_service.register_backlog(FakeSlack(), lambda text, thread_ts=None: said.append(text), "@정문기 내용", "U1", None)
+    backlog_slack.register_backlog(FakeSlack(), lambda text, thread_ts=None: said.append(text), "@정문기 내용", "U1", None)
     assert "@멘션" in said[-1]
 
 
 def test_reminder_messages_split_and_include_buttons():
     records = [{"backlog_id": f"id{i}", "content": f"내용{i}", "reporter_name": "정문기", "created_at": "2026-10-13T10:00:00+09:00", "docs": []}
                for i in range(25)]
-    messages = slack_service.reminder_messages(records)
+    messages = backlog_slack.reminder_messages(records)
     assert len(messages) == 2 and all(len(m) <= 50 for m in messages)
     actions = [b for m in messages for b in m if b["type"] == "actions"]
     assert len(actions) == 25
@@ -226,10 +226,10 @@ def test_reminder_messages_split_and_include_buttons():
 
 def test_resolve_button_by_assignee_updates_message(monkeypatch):
     monkeypatch.setattr(backlog, "resolve", lambda bid, uid: "resolved" if uid == "UA" else "not_assignee")
-    blocks = slack_service.reminder_item_blocks({"backlog_id": "B1", "content": "c", "created_at": "2026-10-13", "docs": []})
+    blocks = backlog_slack.reminder_item_blocks({"backlog_id": "B1", "content": "c", "created_at": "2026-10-13", "docs": []})
     body = {"user": {"id": "UA"}, "actions": [{"value": "B1"}], "channel": {"id": "D1"}, "message": {"ts": "9.0", "blocks": blocks, "text": "t"}}
     client = FakeSlack()
-    slack_service.handle_backlog_button(body, client, resolve=True)
+    backlog_slack.handle_backlog_button(body, client, resolve=True)
     new_blocks = client.updates[-1]["blocks"]
     assert not any(b["type"] == "actions" for b in new_blocks)
     assert "해결됨으로 처리" in new_blocks[-1]["elements"][0]["text"]
@@ -239,7 +239,7 @@ def test_resolve_button_by_someone_else_is_refused(monkeypatch):
     monkeypatch.setattr(backlog, "resolve", lambda bid, uid: "resolved" if uid == "UA" else "not_assignee")
     body = {"user": {"id": "UX"}, "actions": [{"value": "B1"}], "channel": {"id": "D1"}, "message": {"ts": "9.0", "blocks": [], "text": "t"}}
     client = FakeSlack()
-    slack_service.handle_backlog_button(body, client, resolve=True)
+    backlog_slack.handle_backlog_button(body, client, resolve=True)
     assert client.updates == [] and "담당자만" in client.ephemerals[-1]["text"]
 
 
@@ -247,5 +247,5 @@ def test_send_reminders_dms_each_assignee(monkeypatch):
     record = {"backlog_id": "B1", "content": "c", "reporter_name": None, "created_at": "2026-10-13", "docs": []}
     monkeypatch.setattr(backlog, "open_by_assignee", lambda: {"UA": [record], "UB": [record, {**record, "backlog_id": "B2"}]})
     client = FakeSlack()
-    slack_service.send_backlog_reminders(client)
+    backlog_slack.send_backlog_reminders(client)
     assert [p["channel"] for p in client.posts] == ["UA", "UB"]

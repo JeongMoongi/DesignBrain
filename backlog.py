@@ -22,6 +22,10 @@ LINKED_MIN_SCORE = 0.33
 UNLINKED_MIN_SCORE = 0.40
 MAX_NOTES_PER_ANSWER = 3
 
+# 슬랙에서 쓰는 백로그 명령 키워드와 등록 안내 문구 (대화 기록에서 이 메세지들을 거를 때도 쓴다)
+BACKLOG_KEYWORD = "백로그"
+BACKLOG_CONFIRM_PREFIX = "📝 백로그를 등록했어요"
+
 # 슬랙 멘션 형식: <@U123> 또는 <@U123|이름>
 MENTION_PATTERN = re.compile(r"^\s*<@([UW][A-Z0-9]+)(?:\|[^>]*)?>\s*(.*)$", re.S)
 # 노션 페이지 URL 끝의 32자리 ID
