@@ -458,6 +458,25 @@ def rewrite_search_query(query: str, chat_history: List[Dict[str, str]]) -> str:
     logger.info("✏️ [검색어 재작성] %s → %s", query, rewritten)
     return rewritten
 
+USED_DOCS_LABEL = "사용한 문서:"
+# GPT가 '**사용한 문서:** …'처럼 마크다운으로 꾸미는 경우가 있다. 제목 끝의 따옴표(’) 등은 지우면 안 되므로 마크다운 기호만 뗀다
+MARKDOWN_MARKS = " *_`"
+USED_DOCS_PATTERN = re.compile(rf"^[\s*_`>-]*{USED_DOCS_LABEL}(.*)$")
+
+def split_used_docs(reply: str, search_results: list) -> tuple:
+    """답변 끝의 '사용한 문서:' 줄을 떼어 내고, 그 문서들의 검색 결과만 돌려준다 (참고 문서 링크/이미지/백로그용).
+    줄이 없으면 검색 1위 문서를, '없음'이면 빈 목록을 쓴다. 검색 결과에 없는 제목은 무시한다."""
+    lines = reply.rstrip().split("\n")
+    match = USED_DOCS_PATTERN.match(lines[-1].strip()) if lines else None
+    if not match:
+        logger.info("📎 [사용한 문서] 표시가 없어 검색 1위 문서만 참고 문서로 씁니다.")
+        top_page = search_results[0].payload.get("page_id")
+        return reply, [hit for hit in search_results if hit.payload.get("page_id") == top_page]
+    cited = {_normalize_name(title.strip(MARKDOWN_MARKS)) for title in match.group(1).split("|")}
+    used = [hit for hit in search_results if _normalize_name(hit.payload.get("title", "")) in cited]
+    logger.info("📎 [사용한 문서] %s", match.group(1).strip(MARKDOWN_MARKS))
+    return "\n".join(lines[:-1]).rstrip(), used
+
 def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, str]) -> Dict:
     search_query = rewrite_search_query(query, chat_history)
     query_vector = get_embedding(search_query)
@@ -478,40 +497,16 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
             "images": []
         }
 
-    context_blocks = []
-    page_ids = []
-    doc_urls = []
-
-    for hit in search_results:
-        payload = hit.payload
-        text = payload.get("text", "")
-        title = payload.get("title", "무제")
-        url = payload.get("url", "")
-        page_id = payload.get("page_id")
-
-        context_blocks.append(f"[참고 문서: {title}]\n{text}")
-        # 검색 순서(이름 일치 → 유사도)를 유지하며 중복 제거
-        link = f"[{title}]({url})"
-        if url and link not in doc_urls: doc_urls.append(link)
-        if page_id and page_id not in page_ids: page_ids.append(page_id)
-
-    # 이름이 일치한 문서/항목이 있으면 그 이미지만 쓴다 (유사도로 채운 무관한 문서의 도판이 붙지 않게)
-    image_hits = search_results[:named_count] if named_count else search_results
-    images, seen_block_ids = [], set()
-    for hit in image_hits:
-        for img in hit.payload.get("images", []):
-            if img.get("block_id") and img["block_id"] not in seen_block_ids:
-                seen_block_ids.add(img["block_id"])
-                images.append(img)
-
-    context_str = "\n\n".join(context_blocks)
-    doc_urls_str = "\n- 참고 문서 : " + ", ".join(doc_urls) if doc_urls else ""
+    context_str = "\n\n".join(f"[참고 문서: {hit.payload.get('title', '무제')}]\n{hit.payload.get('text', '')}"
+                              for hit in search_results)
 
     # 2. GPT 프롬프트 구성
     system_prompt = (
         "너는 게임 기획팀의 친근하고 유능한 AI 어시스턴트 '@Brain'이다.\n"
         "제공된 기획서 [컨텍스트] 및 표(Table) 데이터에 기반하여 사용자의 질문에 정확하고 상세하게 답변하라.\n"
-        "컨텍스트의 표나 텍스트에 있는 항목명과 수치는 원문 그대로 정확하게 인용하라."
+        "컨텍스트의 표나 텍스트에 있는 항목명과 수치는 원문 그대로 정확하게 인용하라.\n"
+        f"답변의 맨 마지막 줄에는 '{USED_DOCS_LABEL} 제목1 | 제목2' 형식으로, 답변에 실제로 사용한 [참고 문서]의 제목만 적어라. "
+        f"사용한 문서가 없으면 '{USED_DOCS_LABEL} 없음'이라고 적어라."
     )
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -528,23 +523,38 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
         messages=messages,
         temperature=0.1
     )
-    ai_reply = completion.choices[0].message.content
+    ai_reply, used_hits = split_used_docs(completion.choices[0].message.content or "", search_results)
+    used_page_ids = list(dict.fromkeys(hit.payload["page_id"] for hit in used_hits if hit.payload.get("page_id")))
+
+    # 이름이 일치한 문서/항목이 있으면 그 이미지만, 그중에서도 답변에 사용한 문서의 이미지만 쓴다
+    image_hits = search_results[:named_count] if named_count else search_results
+    used_ids = {hit.id for hit in used_hits}
+    image_hits = [hit for hit in image_hits if hit.id in used_ids]
+    images, seen_block_ids = [], set()
+    for hit in image_hits:
+        for img in hit.payload.get("images", []):
+            if img.get("block_id") and img["block_id"] not in seen_block_ids:
+                seen_block_ids.add(img["block_id"])
+                images.append(img)
 
     # 4. 관련 미해결 백로그 참고 문구 (실패해도 답변은 그대로 보낸다)
     try:
-        notes = backlog.notes_for_answer(query_vector, page_ids)
+        notes = backlog.notes_for_answer(query_vector, used_page_ids)
     except Exception as e:
         logger.warning("⚠️ [백로그] 참고 문구 조회 실패, 답변만 보냅니다: %s", e)
         notes = []
     if notes:
         ai_reply += "\n\n" + "\n".join(f"📌 참고 : {note}" for note in notes)
 
-    if doc_urls_str:
-        ai_reply += f"\n{doc_urls_str}"
+    # 검색 순서를 유지하며 문서당 링크 하나
+    doc_urls = list(dict.fromkeys(f"[{hit.payload.get('title', '무제')}]({hit.payload['url']})"
+                                  for hit in used_hits if hit.payload.get("url")))
+    if doc_urls:
+        ai_reply += "\n\n- 참고 문서 : " + ", ".join(doc_urls)
 
     return {
         "status": "success",
         "AI_답변": ai_reply,
-        "page_ids": page_ids,
+        "page_ids": used_page_ids,
         "images": images
     }

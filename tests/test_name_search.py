@@ -1,3 +1,4 @@
+import pytest
 from qdrant_client.models import PointStruct
 import ai_engine
 import config
@@ -62,7 +63,8 @@ def test_answer_uses_images_of_named_item_and_ranked_links(local_db, monkeypatch
     class Completions:
         @staticmethod
         def create(**kwargs):
-            return type("C", (), {"choices": [type("Ch", (), {"message": type("M", (), {"content": "답변"})()})()]})()
+            reply = "답변\n사용한 문서: 챕터 1 몹 | 파트너 특성 시스템"
+            return type("C", (), {"choices": [type("Ch", (), {"message": type("M", (), {"content": reply})()})()]})()
     monkeypatch.setattr(ai_engine, "get_openai", lambda: type("O", (), {"chat": type("Chat", (), {"completions": Completions})}))
 
     result = ai_engine.ask_ai_with_history("석화체 알려줘", [])
@@ -70,6 +72,43 @@ def test_answer_uses_images_of_named_item_and_ranked_links(local_db, monkeypatch
     assert [img["block_id"] for img in result["images"]] == ["petri"]
     # 참고 문서는 검색 순서(이름 일치 먼저)대로
     assert result["AI_답변"].index("[챕터 1 몹]") < result["AI_답변"].index("[파트너 특성 시스템]")
+
+
+class Doc:
+    def __init__(self, id, title, page_id):
+        self.id, self.payload = id, {"title": title, "page_id": page_id}
+
+
+DOCS = [Doc(1, "챕터 1 몹", "P1"), Doc(2, "파트너 특성 시스템", "P2"), Doc(3, "챕터 1 몹", "P1"),
+        Doc(4, "챕터 1 미니보스 ‘변종 분쇄자’", "P3")]
+
+
+def ids(hits):
+    return [h.id for h in hits]
+
+
+def test_used_docs_line_is_removed_and_selects_docs():
+    reply, used = ai_engine.split_used_docs("석화체는...\n\n사용한 문서: 챕터 1 몹", DOCS)
+    assert reply == "석화체는..."
+    assert ids(used) == [1, 3]
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("**사용한 문서:** 챕터1 몹 | 파트너 특성 시스템", [1, 2, 3]),   # 굵게 표시, 띄어쓰기 차이
+    ("사용한 문서: 챕터 1 미니보스 ‘변종 분쇄자’", [4]),            # 따옴표로 끝나는 제목
+    ("사용한 문서: 없음", []),
+    ("사용한 문서: 지어낸 문서", []),                               # 검색 결과에 없는 제목은 무시
+])
+def test_used_docs_variants(line, expected):
+    reply, used = ai_engine.split_used_docs(f"답변\n{line}", DOCS)
+    assert reply == "답변"
+    assert ids(used) == expected
+
+
+def test_missing_used_docs_line_falls_back_to_top_document():
+    reply, used = ai_engine.split_used_docs("답변만 있음", DOCS)
+    assert reply == "답변만 있음"
+    assert ids(used) == [1, 3]
 
 
 def test_ambiguous_names_are_ignored(local_db):
