@@ -50,13 +50,13 @@ def _connect_qdrant() -> QdrantClient:
 
     # Qdrant 컬렉션 및 페이로드 인덱스 초기화
     # Qdrant Cloud는 필터에 쓰는 필드에 인덱스가 필요하다
-    for collection, indexed_fields in ((config.COLLECTION_NAME, ["page_id", "item"]),
-                                       (config.BACKLOG_COLLECTION, ["status", "assignee_id", "page_ids"])):
+    text_vectors = VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE)
+    for collection, vectors, indexed_fields in ((config.COLLECTION_NAME, text_vectors, ["page_id", "item"]),
+                                                (config.BACKLOG_COLLECTION, text_vectors, ["status", "assignee_id", "page_ids"]),
+                                                # 질문 기록은 검색하지 않으므로 벡터 없이 저장한다
+                                                (config.QA_LOG_COLLECTION, {}, ["answer_ts"])):
         if not client.collection_exists(collection):
-            client.create_collection(
-                collection_name=collection,
-                vectors_config=VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE)
-            )
+            client.create_collection(collection_name=collection, vectors_config=vectors)
             logger.info("✨ [Qdrant] '%s' 컬렉션이 새로 생성되었습니다.", collection)
 
         for field in indexed_fields:

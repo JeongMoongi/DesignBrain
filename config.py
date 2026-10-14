@@ -27,6 +27,12 @@ COLLECTION_NAME = "game_docs"
 BACKLOG_COLLECTION = "backlogs"
 # 매일 이 시각(한국 시간)에 담당자에게 미해결 백로그 확인 DM을 보낸다
 BACKLOG_REMINDER_HOUR = 10
+# 질문/답변 기록 (서비스 개선용). 벡터 없이 payload만 저장한다
+QA_LOG_COLLECTION = "qa_logs"
+# 매주 이 요일(월=0)·시각(한국 시간)에 지난 7일 질문 기록 요약을 이 슬랙 사용자에게 DM으로 보낸다 (비어 있으면 보내지 않음)
+QA_REPORT_USER_ID = os.environ.get("QA_REPORT_USER_ID")
+QA_REPORT_WEEKDAY = 0
+QA_REPORT_HOUR = 10
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536

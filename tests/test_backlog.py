@@ -7,6 +7,7 @@ import backlog_slack
 import clients
 import config
 import indexing
+import slack_service
 from fakes import FakeQdrant, fake_openai, hit, raiser
 
 DIM = config.EMBEDDING_DIM
@@ -187,7 +188,7 @@ class FakeSlack:
 
 
 def test_mention_in_answer_thread_links_answered_docs(monkeypatch):
-    backlog_slack._user_names.clear()
+    slack_service._user_names.clear()
     captured = {}
     monkeypatch.setattr(backlog, "linked_docs", lambda ids: [{"page_id": i, "title": "보스 기획서", "url": "https://n/p"} for i in ids])
     monkeypatch.setattr(backlog, "add", lambda **kw: captured.update(kw) or {**kw, "note": "정문기 님이 … 확인하셨습니다."})

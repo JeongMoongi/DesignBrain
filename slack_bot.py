@@ -5,6 +5,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import backlog_slack
 import config
+import qa_slack
 import slack_service
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ def init_slack():
         if request_text is not None:
             backlog_slack.handle_backlog_mention(client, say, event, request_text)
             return
-        slack_service.process_chat_and_reply(client, say, channel_id, thread_ts, event.get("ts"), text)
+        slack_service.process_chat_and_reply(client, say, channel_id, thread_ts, event.get("ts"), text, event.get("user"))
 
     # 3. 1:1 DM 메세지 처리
     @slack_app.event("message")
@@ -64,7 +65,7 @@ def init_slack():
             if request_text is not None:
                 backlog_slack.handle_backlog_mention(client, say, event, request_text)
                 return
-            slack_service.process_chat_and_reply(client, say, channel_id, thread_ts, event.get("ts"), user_text)
+            slack_service.process_chat_and_reply(client, say, channel_id, thread_ts, event.get("ts"), user_text, user_id)
 
     # 4. /백로그 커맨드 처리 (슬래시 명령은 스레드 정보가 없어 기획서와 연결하지 않고, 내용 유사도로만 답변에 붙는다)
     @slack_app.command("/백로그")
@@ -84,6 +85,15 @@ def init_slack():
         ack()
         backlog_slack.handle_backlog_button(body, client, resolve=False)
 
+    # 6. 답변에 단 👍/👎 리액션을 질문 기록에 반영 (슬랙 앱에 reaction_added/removed 이벤트 구독 필요)
+    @slack_app.event("reaction_added")
+    def handle_reaction_added(event):
+        qa_slack.handle_reaction(event, added=True)
+
+    @slack_app.event("reaction_removed")
+    def handle_reaction_removed(event):
+        qa_slack.handle_reaction(event, added=False)
+
     handler = SocketModeHandler(slack_app, app_token)
     return handler
 
@@ -94,8 +104,14 @@ def start_slack_bot():
         h.connect()
         backlog_slack.reminder_stop.clear()
         threading.Thread(target=backlog_slack.reminder_loop, args=(slack_app.client,), daemon=True, name="backlog-reminder").start()
+        if config.QA_REPORT_USER_ID:
+            qa_slack.report_stop.clear()
+            threading.Thread(target=qa_slack.report_loop, args=(slack_app.client,), daemon=True, name="qa-weekly-report").start()
+        else:
+            logger.info("ℹ️ [질문 기록] QA_REPORT_USER_ID 미설정으로 주간 요약을 보내지 않습니다.")
 
 def stop_slack_bot():
     backlog_slack.reminder_stop.set()
+    qa_slack.report_stop.set()
     if handler:
         handler.close()

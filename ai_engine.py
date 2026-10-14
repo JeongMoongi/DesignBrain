@@ -91,7 +91,9 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
             "status": "success",
             "AI_답변": "죄송하지만, 질문과 관련된 기획서 내용을 찾을 수 없습니다.",
             "page_ids": [],
-            "images": []
+            "images": [],
+            "search_query": search_query,
+            "used_docs": []
         }
 
     context_str = "\n\n".join(f"[참고 문서: {hit.payload.get('title', '무제')}]\n{hit.payload.get('text', '')}"
@@ -155,5 +157,8 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
         "status": "success",
         "AI_답변": ai_reply,
         "page_ids": used_page_ids,
-        "images": images
+        "images": images,
+        # 질문 기록용: 검색에 쓴 질문(후속 질문이면 재작성된 것)과 답변에 사용한 기획서 제목
+        "search_query": search_query,
+        "used_docs": list(dict.fromkeys(hit.payload.get("title", "무제") for hit in used_hits))
     }

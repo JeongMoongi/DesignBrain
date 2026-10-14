@@ -15,3 +15,4 @@ venv/
 .idea/
 Thumbs.db
 .DS_Store
+qa_logs_*.csv

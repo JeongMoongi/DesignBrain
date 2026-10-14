@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 BACKLOG_USAGE = "형식: `@Brain 백로그 @담당자 내용` (답변 스레드에서 쓰면 그 답변의 기획서와 연결돼요)"
 LEADING_MENTION = re.compile(r'^\s*<@[A-Z0-9]+(?:\|[^>]*)?>\s*')
-_user_names = {}
 
 def backlog_request_text(raw_text):
     """'@Brain 백로그 @담당자 내용' 또는 DM의 '백로그 @담당자 내용'이면 '@담당자 내용' 부분을, 아니면 None"""
@@ -19,17 +18,6 @@ def backlog_request_text(raw_text):
     if not text.startswith(backlog.BACKLOG_KEYWORD):
         return None
     return text[len(backlog.BACKLOG_KEYWORD):].strip()
-
-def user_name(client, user_id):
-    """슬랙 표시 이름 (users:read 권한이 없거나 실패하면 None). 답변 문구에 멘션을 쓰면 매번 알림이 가므로 이름을 쓴다."""
-    if user_id not in _user_names:
-        try:
-            profile = client.users_info(user=user_id)["user"]
-            _user_names[user_id] = profile.get("profile", {}).get("display_name") or profile.get("real_name")
-        except Exception as e:
-            logger.warning("⚠️ [Slack] 사용자 이름 조회 실패 (%s): %s", user_id, e)
-            return None
-    return _user_names[user_id]
 
 def docs_answered_in_thread(client, channel_id, thread_ts, before_ts):
     """스레드에서 이 명령 직전의 봇 답변이 참고한 기획서. 답변 메타데이터로 판별하고,
@@ -54,8 +42,8 @@ def register_backlog(client, say, request_text, reporter_id, reply_ts, reporter_
     assignee_id, content = parsed
     try:
         record = backlog.add(
-            reporter_id=reporter_id, reporter_name=user_name(client, reporter_id) or reporter_name,
-            assignee_id=assignee_id, assignee_name=user_name(client, assignee_id),
+            reporter_id=reporter_id, reporter_name=slack_service.user_name(client, reporter_id) or reporter_name,
+            assignee_id=assignee_id, assignee_name=slack_service.user_name(client, assignee_id),
             content=content, docs=list(docs), source={"reply_ts": reply_ts or ""},
         )
     except Exception as e:

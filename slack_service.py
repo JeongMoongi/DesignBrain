@@ -7,6 +7,7 @@ import ai_engine
 import backlog
 import config
 import notion_parser
+import qa_log
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,19 @@ LEGACY_PLACEHOLDER = "기획서를 읽고 분석 중입니다"
 def is_placeholder(text):
     return text in PLACEHOLDER_EMOJIS or LEGACY_PLACEHOLDER in text
 
+_user_names = {}
+
+def user_name(client, user_id):
+    """슬랙 표시 이름 (users:read 권한이 없거나 실패하면 None). 답변 문구에 멘션을 쓰면 매번 알림이 가므로 이름을 쓴다."""
+    if user_id not in _user_names:
+        try:
+            profile = client.users_info(user=user_id)["user"]
+            _user_names[user_id] = profile.get("profile", {}).get("display_name") or profile.get("real_name")
+        except Exception as e:
+            logger.warning("⚠️ [Slack] 사용자 이름 조회 실패 (%s): %s", user_id, e)
+            return None
+    return _user_names[user_id]
+
 def failure_message(stage, reason, hint):
     return f"❌ 답변을 만들지 못했어요.\n• *실패 단계:* {stage}\n• *원인:* {reason}\n{hint}"
 
@@ -89,15 +103,16 @@ def event_thread_ts(event):
     (스레드 답장을 새 스레드로 잡으면 대화 기록이 비어 후속 질문이 맥락 없이 검색된다)"""
     return event.get("thread_ts") or event.get("ts")
 
-def process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text):
+def process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text, user_id=None):
     """어떤 단계에서 실패하더라도 사용자가 '분석 중' 메세지만 보고 기다리지 않도록 실패 원인을 스레드에 안내한다.
-    '분석 중' 메세지를 이미 보냈다면 그 메세지를 실패 안내로 바꾼다."""
+    '분석 중' 메세지를 이미 보냈다면 그 메세지를 실패 안내로 바꾼다. 결과와 관계없이 질문 기록을 남긴다."""
     sent = {}
     try:
         _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text, sent)
     except Exception as e:
         logger.exception("🚨 [Slack] 메세지 처리 실패")
         failure = ai_engine.describe_failure(e)
+        sent.update(status="error", error_stage="메세지 처리", error_reason=failure["reason"])
         text = failure_message("메세지 처리", failure["reason"], failure["hint"])
         if sent.get("placeholder_ts"):
             try:
@@ -109,6 +124,35 @@ def process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_t
             say(text=text, thread_ts=thread_ts)
         except Exception:
             logger.exception("🚨 [Slack] 실패 안내 메세지 전송도 실패")
+    finally:
+        log_question(client, channel_id, thread_ts, message_ts, user_id, sent)
+
+def log_question(client, channel_id, thread_ts, message_ts, user_id, sent):
+    """질문 기록을 남긴다 (서비스 개선용). 기록에 실패해도 답변에는 영향이 없다."""
+    if not sent.get("question"):
+        return
+    try:
+        qa_log.record({
+            "user_id": user_id,
+            "user_name": user_name(client, user_id) if user_id else None,
+            "channel_id": channel_id,
+            "channel_type": "dm" if channel_id.startswith("D") else "channel",
+            "thread_ts": thread_ts,
+            "question_ts": message_ts,
+            # 👍/👎 리액션은 답변 메세지('분석 중'을 바꾼 메세지)에 달린다
+            "answer_ts": sent.get("placeholder_ts"),
+            "follow_up": thread_ts != message_ts,
+            "question": sent["question"],
+            "search_query": sent.get("search_query"),
+            "status": sent.get("status", "error"),
+            "error_stage": sent.get("error_stage"),
+            "error_reason": sent.get("error_reason"),
+            "used_docs": sent.get("used_docs", []),
+            "answer": sent.get("answer", ""),
+            "image_count": sent.get("image_count", 0),
+        })
+    except Exception as e:
+        logger.warning("⚠️ [질문 기록] 저장 실패 (답변에는 영향 없음): %s", e)
 
 def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text, sent):
     cleaned_query = re.sub(r'<@.*?>', '', raw_text).strip()
@@ -149,10 +193,12 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
     # '분석 중' 메세지를 답변(또는 실패 안내)으로 바꿔, 스레드에 답변당 메세지 하나만 남긴다
     placeholder = say(text=random.choice(PLACEHOLDER_EMOJIS), thread_ts=thread_ts)
     placeholder_ts = sent["placeholder_ts"] = placeholder["ts"]
+    sent["question"] = final_query
 
     res = ai_engine.ask_ai_with_history(final_query, chat_history)
 
     if res.get("status") == "error":
+        sent.update(status="error", error_stage=res["stage"], error_reason=res["reason"])
         client.chat_update(channel=channel_id, ts=placeholder_ts,
                            text=failure_message(res["stage"], res["reason"], res["hint"]))
         return
@@ -162,6 +208,8 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
     image_objs = collect_images(res.get("images", []), shared_block_ids, limit=IMAGES_PER_ANSWER)
     file_ids, block_ids = upload_images(client, image_objs)
     page_ids = res.get("page_ids", [])
+    sent.update(status="success", search_query=res.get("search_query"), used_docs=res.get("used_docs", []),
+                answer=formatted_answer, image_count=len(file_ids))
     try:
         client.chat_update(channel=channel_id, ts=placeholder_ts, text=formatted_answer,
                            file_ids=file_ids or None, metadata=answer_metadata(page_ids, block_ids))
