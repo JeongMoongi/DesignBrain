@@ -88,6 +88,7 @@ def test_backlog_survives_document_resync_and_delete(store, local_db):
 
 def test_answer_gets_notes_appended(monkeypatch):
     class Hit:
+        id = "hit"
         score = 0.9
         payload = {"text": "본문", "title": "문서", "url": "https://notion/p", "page_id": "P1"}
 
@@ -112,6 +113,7 @@ def test_answer_survives_backlog_failure(monkeypatch):
     monkeypatch.setattr(backlog, "notes_for_answer", boom)
 
     class Hit:
+        id = "hit"
         score = 0.9
         payload = {"text": "본문", "title": "문서", "url": "", "page_id": "P1"}
     monkeypatch.setattr(ai_engine, "get_embedding", lambda q: QUERY)

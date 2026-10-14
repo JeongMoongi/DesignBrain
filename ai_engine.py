@@ -1,4 +1,5 @@
 import logging
+import re
 import threading
 import uuid
 from typing import List, Dict
@@ -46,6 +47,8 @@ def close_clients():
         if _openai_client is not None:
             _openai_client.close()
             _openai_client = None
+    # 다음 연결은 다른 DB일 수 있으므로 (테스트의 임시 DB 등) 이름 목록도 다시 만든다
+    invalidate_name_catalog()
 
 def _connect_qdrant() -> QdrantClient:
     if config.QDRANT_URL and config.QDRANT_API_KEY:
@@ -57,7 +60,7 @@ def _connect_qdrant() -> QdrantClient:
 
     # --- [2. Qdrant 컬렉션 및 페이로드 인덱스 초기화] ---
     # Qdrant Cloud는 필터에 쓰는 필드에 인덱스가 필요하다
-    for collection, indexed_fields in ((COLLECTION_NAME, ["page_id"]),
+    for collection, indexed_fields in ((COLLECTION_NAME, ["page_id", "item"]),
                                        (config.BACKLOG_COLLECTION, ["status", "assignee_id", "page_ids"])):
         if not client.collection_exists(collection):
             client.create_collection(
@@ -219,6 +222,9 @@ def _sync_document(page_id: str, notion_token: str):
             # 이미지 block_id/캡션 캐시: 답변 시 페이지 전체를 다시 훑지 않고 이 블록들만 조회해 새 URL을 받는다
             "images": doc_data.get("images", [])
         }
+        item = chunk_item_name(chunk)
+        if item:
+            payload["item"] = item
         points.append(PointStruct(id=chunk_point_id(page_id, idx), vector=vector, payload=payload))
 
     # 파싱/임베딩 도중 휴지통으로 옮겨졌을 수 있으므로 저장 직전에 다시 확인 (확인 실패 시 예외로 저장 중단)
@@ -239,6 +245,7 @@ def _sync_document(page_id: str, notion_token: str):
         )
     except Exception as e:
         logger.warning("⚠️ [Qdrant] 이전 청크 정리 실패 (새 청크는 저장됨, page_id: %s): %s", page_id, e)
+    invalidate_name_catalog()
 
     logger.info("🎉 [동기화 완료] '%s' (%d개 청크 저장)", title, len(points))
     return True
@@ -254,7 +261,119 @@ def _delete_page_points(page_id: str):
         collection_name=COLLECTION_NAME,
         points_selector=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))])
     )
+    invalidate_name_catalog()
     logger.info("🗑️ [삭제 완료] page_id: %s 의 청크를 Qdrant에서 제거했습니다.", page_id)
+
+
+# --- [5. 이름 일치 검색: 문서 제목/DB 항목명이 질문에 그대로 있으면 해당 청크를 먼저 쓴다] ---
+# 임베딩은 '석화체' 같은 고유 이름을 잘 잡지 못하고, 긴 항목 청크에서는 이름 신호가 묻혀 검색에서 밀린다
+ITEM_NAME_PATTERN = re.compile(r"^- 항목: \[(.+?)\] ➔", re.MULTILINE)
+# '패턴 1'처럼 여러 곳에 있는 이름은 어느 것인지 알 수 없으므로 이름 일치로 쓰지 않는다
+MAX_TARGETS_PER_ALIAS = 3
+NAME_MATCH_PER_TARGET = 8
+NAME_MATCH_TOTAL = 12
+SEARCH_LIMIT = 10
+
+def chunk_item_name(chunk: str) -> str:
+    """DB 항목 청크면 항목 이름을 돌려준다 (긴 항목을 나눈 조각에도 항목명이 붙어 있다)"""
+    match = ITEM_NAME_PATTERN.search(chunk)
+    return match.group(1) if match else ""
+
+def _normalize_name(text: str) -> str:
+    return re.sub(r"\s+", "", text).lower()
+
+def name_aliases(name: str) -> set:
+    """전체 이름과 함께, 괄호/따옴표로 구분된 부분도 별칭으로 쓴다.
+    (예: '덩굴 추적자 (VineStalker)' → 덩굴 추적자, VineStalker / '챕터 1 미니보스 ‘변종 분쇄자’' → 변종 분쇄자)
+    ' - ' 앞부분은 '패턴 1 - SporeLaunch'의 '패턴 1'처럼 분류명인 경우가 많아 뒷부분만 쓴다."""
+    last = re.split(r"\s+-\s+", name)[-1]
+    parts = [name, last] + re.split(r"[()（）‘’“”'\"]", last)
+    return {alias for alias in map(_normalize_name, parts) if len(alias) >= 2}
+
+_name_catalog = None
+_name_catalog_lock = threading.Lock()
+
+def invalidate_name_catalog():
+    global _name_catalog
+    with _name_catalog_lock:
+        _name_catalog = None
+
+def _get_name_catalog() -> Dict[str, set]:
+    """별칭 → {(page_id, item)}. item이 빈 문자열이면 문서 전체. 동기화/삭제 후 다음 질문에서 다시 만든다."""
+    global _name_catalog
+    with _name_catalog_lock:
+        if _name_catalog is not None:
+            return _name_catalog
+        targets = set()
+        offset = None
+        while True:
+            points, offset = get_qdrant().scroll(collection_name=COLLECTION_NAME, limit=256, offset=offset,
+                                                 with_payload=["page_id", "title", "item"], with_vectors=False)
+            for p in points:
+                page_id = p.payload.get("page_id")
+                if not page_id:
+                    continue
+                targets.add((page_id, "", p.payload.get("title", "")))
+                if p.payload.get("item"):
+                    targets.add((page_id, p.payload["item"], p.payload["item"]))
+            if offset is None:
+                break
+        catalog = {}
+        for page_id, item, name in targets:
+            for alias in name_aliases(name):
+                catalog.setdefault(alias, set()).add((page_id, item))
+        _name_catalog = {alias: t for alias, t in catalog.items() if len(t) <= MAX_TARGETS_PER_ALIAS}
+        logger.info("📇 [이름 목록] 별칭 %d개 준비", len(_name_catalog))
+        return _name_catalog
+
+def match_names(query: str, catalog: Dict[str, set]) -> List[tuple]:
+    """질문에 들어 있는 이름의 대상 목록. 더 긴 이름에 포함된 짧은 이름('변종 분쇄자' 안의 '분쇄자')은 뺀다."""
+    normalized = _normalize_name(query)
+    spans = []
+    for alias in catalog:
+        start = normalized.find(alias)
+        while start != -1:
+            spans.append((start, start + len(alias), alias))
+            start = normalized.find(alias, start + 1)
+    kept = [s for s in spans
+            if not any(o[0] <= s[0] and s[1] <= o[1] and o[1] - o[0] > s[1] - s[0] for o in spans)]
+    targets = []
+    for _, _, alias in sorted(kept):
+        for target in sorted(catalog[alias]):
+            if target not in targets:
+                targets.append(target)
+    return targets
+
+def search_chunks(query: str, query_vector: List[float]) -> list:
+    """이름이 일치한 문서/항목 안에서 먼저 찾고, 나머지는 벡터 유사도 검색으로 채운다"""
+    try:
+        catalog = _get_name_catalog()
+    except Exception as e:
+        # 이름 일치는 보조 수단이므로 목록을 못 만들어도 벡터 검색으로 답변한다 (다음 질문에서 다시 시도)
+        logger.warning("⚠️ [이름 목록] 준비 실패, 벡터 검색만 사용합니다: %s", e)
+        catalog = {}
+    named = []
+    for page_id, item in match_names(query, catalog):
+        conditions = [FieldCondition(key="page_id", match=MatchValue(value=page_id))]
+        if item:
+            conditions.append(FieldCondition(key="item", match=MatchValue(value=item)))
+        named.extend(get_qdrant().query_points(
+            collection_name=COLLECTION_NAME, query=query_vector,
+            query_filter=Filter(must=conditions), limit=NAME_MATCH_PER_TARGET
+        ).points)
+    seen = set()
+    named = [p for p in named if not (p.id in seen or seen.add(p.id))][:NAME_MATCH_TOTAL]
+
+    similar = get_qdrant().query_points(
+        collection_name=COLLECTION_NAME,
+        query=query_vector,
+        limit=SEARCH_LIMIT,
+        score_threshold=0.25
+    ).points
+    if named:
+        logger.info("📇 [이름 일치] %d개 청크를 먼저 사용", len(named))
+    combined = named + [p for p in similar if p.id not in seen]
+    return combined[:max(SEARCH_LIMIT, len(named))]
 
 
 # --- [6. AI Q&A 검색 및 답변 생성 함수] ---
@@ -337,18 +456,13 @@ def rewrite_search_query(query: str, chat_history: List[Dict[str, str]]) -> str:
     return rewritten
 
 def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, str]) -> Dict:
-    query_vector = get_embedding(rewrite_search_query(query, chat_history))
+    search_query = rewrite_search_query(query, chat_history)
+    query_vector = get_embedding(search_query)
 
-    # 1. 벡터 코사인 유사도 검색 (Threshold 0.25 적용 및 검색 후보 10개 확장)
+    # 1. 이름 일치 + 벡터 코사인 유사도 검색
     progress["stage"] = "기획서 검색"
-    response = get_qdrant().query_points(
-        collection_name=COLLECTION_NAME,
-        query=query_vector,
-        limit=10,
-        score_threshold=0.25
-    )
-    search_results = response.points
-    
+    search_results = search_chunks(search_query, query_vector)
+
     logger.info("🔍 [Qdrant 검색] %d개 결과", len(search_results))
     for idx, hit in enumerate(search_results):
         logger.debug("   └ [%d] Score: %.4f | Title: %s | Text: %s...", idx + 1, hit.score, hit.payload.get("title"), hit.payload.get("text", "")[:50])

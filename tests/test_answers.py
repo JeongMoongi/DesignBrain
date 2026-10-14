@@ -37,6 +37,7 @@ def raiser(error):
 
 
 class Hit:
+    id = "hit"
     score = 0.9
     payload = {"text": "본문", "title": "문서", "url": "https://notion/p", "page_id": "p", "images": []}
 
