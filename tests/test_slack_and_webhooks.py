@@ -71,7 +71,7 @@ class AnswerSlack:
 @pytest.fixture
 def answer_with_images(monkeypatch):
     monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h: {
-        "status": "success", "AI_답변": "**답변**", "page_ids": [],
+        "status": "success", "AI_답변": "**답변**", "page_ids": ["P1"],
         "images": [{"block_id": "b1", "caption": "도판"}, {"block_id": "b2", "caption": "도판"}, {"block_id": "b3", "caption": "도판"}]})
     monkeypatch.setattr(config, "NOTION_INTEGRATION_TOKEN", "tok")
     monkeypatch.setattr(slack_service.notion_parser, "fetch_image_by_block_id",
@@ -98,14 +98,16 @@ def test_answer_and_new_images_arrive_in_one_message(answer_with_images):
     assert update["ts"] == "4" and update["text"] == "*답변*"
     # 이미 보여준 b1은 건너뛰고 새 도판 2장만 붙인다
     assert update["file_ids"] == ["F1", "F2"]
-    assert update["metadata"]["event_payload"]["image_block_ids"] == ["b2", "b3"]
+    assert update["metadata"] == slack_service.answer_metadata(["P1"], ["b2", "b3"])
     assert all("channel" not in u for u in slack.uploads)
 
 
 def test_answer_is_sent_even_if_attaching_images_fails(answer_with_images):
     slack = AnswerSlack(fail_with_files=True)
     run_reply(slack)
-    assert slack.updates == [{"channel": "D1", "ts": "4", "text": "*답변*"}]
+    # 도판 없이 답변만 보내고, 메타데이터에는 붙이지 못한 도판을 기록하지 않는다
+    assert slack.updates == [{"channel": "D1", "ts": "4", "text": "*답변*",
+                              "metadata": slack_service.answer_metadata(["P1"], [])}]
 
 
 def test_thread_say_posts_directly_without_metadata():
@@ -159,6 +161,21 @@ def test_bare_mention_asks_last_question_again(monkeypatch):
     assert received["query"] == "석화체 알려줘"
     # 직전 답변이 대화 기록에서 빠지지 않는다
     assert received["history"][-1] == {"role": "assistant", "content": "석화체 설명"}
+
+
+@pytest.mark.parametrize("answer,expected", [
+    # 메타데이터가 있으면 거기 기록된 기획서를 쓴다 (본문 링크와 달라도)
+    ({"text": "답변 <https://app.notion.com/p/x-11111111111111111111111111111111|🔗 A>",
+      "metadata": slack_service.answer_metadata(["P1"], [])}, ["P1"]),
+    # 메타데이터가 없는 예전 답변은 본문의 노션 링크로 판별한다
+    ({"text": "답변 <https://app.notion.com/p/x-11111111111111111111111111111111|🔗 A>"},
+     ["11111111-1111-1111-1111-111111111111"]),
+])
+def test_backlog_links_docs_of_previous_answer(monkeypatch, answer, expected):
+    monkeypatch.setattr(slack_service.backlog, "linked_docs", lambda page_ids: page_ids)
+    slack = HistorySlack([{"ts": "1", "user": "U", "text": "질문"}, {"ts": "2", "bot_id": "B", **answer},
+                          {"ts": "3", "user": "U", "text": "백로그 <@U2> 내용"}])
+    assert slack_service.docs_answered_in_thread(slack, "D1", "1", "3") == expected
 
 
 def test_top_level_message_starts_new_thread():

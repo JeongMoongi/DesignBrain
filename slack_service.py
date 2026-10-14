@@ -24,14 +24,22 @@ def format_markdown_for_slack(text: str) -> str:
     text = text.replace("- 참고 문서:", "• *참고 문서:*")
     return text.strip()
 
-# 답변 메세지의 메타데이터에 첨부한 노션 이미지 block_id를 남겨, 같은 스레드에서 같은 도판을 다시 보내지 않는다
-# (업로드 파일명에 넣으면 슬랙이 파일명에서 지워 버린다)
+# 답변 메세지의 메타데이터에 남기는 정보 (사용자에게는 보이지 않는다)
+# - image_block_ids: 첨부한 노션 이미지. 같은 스레드에서 같은 도판을 다시 보내지 않는다 (파일명에 넣으면 슬랙이 지운다)
+# - page_ids: 답변에 사용한 기획서. 이 답변 스레드에서 등록한 백로그를 그 기획서와 연결한다
 ANSWER_EVENT_TYPE = "brain_answer"
 IMAGES_PER_ANSWER = 2
 
+def answer_metadata(page_ids, image_block_ids):
+    return {"event_type": ANSWER_EVENT_TYPE, "event_payload": {"page_ids": page_ids, "image_block_ids": image_block_ids}}
+
+def answer_payload(message):
+    """봇 답변 메세지의 메타데이터. 이 기능 이전의 답변이나 다른 메세지면 None"""
+    metadata = message.get("metadata") or {}
+    return metadata.get("event_payload") if metadata.get("event_type") == ANSWER_EVENT_TYPE else None
+
 def shared_image_ids(message) -> list:
-    payload = (message.get("metadata") or {}).get("event_payload") or {}
-    return payload.get("image_block_ids", [])
+    return (answer_payload(message) or {}).get("image_block_ids", [])
 
 def collect_images(candidates, shared_block_ids, limit):
     """검색 순서대로 스레드에 아직 공유되지 않은 이미지를 최대 limit장 수집.
@@ -135,16 +143,17 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
     # 노션 파일 URL은 만료되므로 답변할 때마다 노션에서 새로 받아 슬랙에 올린다
     image_objs = collect_images(res.get("images", []), shared_block_ids, limit=IMAGES_PER_ANSWER)
     file_ids, block_ids = upload_images(client, image_objs)
-    metadata = {"event_type": ANSWER_EVENT_TYPE, "event_payload": {"image_block_ids": block_ids}}
+    page_ids = res.get("page_ids", [])
     try:
         client.chat_update(channel=channel_id, ts=placeholder_ts, text=formatted_answer,
-                           file_ids=file_ids or None, metadata=metadata)
+                           file_ids=file_ids or None, metadata=answer_metadata(page_ids, block_ids))
     except Exception as e:
         if not file_ids:
             raise
         # 도판 때문에 실패했더라도 답변은 전달한다
         logger.error("🚨 [Slack] 도판을 붙인 답변 전송 실패, 답변만 보냅니다: %s", e)
-        client.chat_update(channel=channel_id, ts=placeholder_ts, text=formatted_answer)
+        client.chat_update(channel=channel_id, ts=placeholder_ts, text=formatted_answer,
+                           metadata=answer_metadata(page_ids, []))
 
 def upload_images(client, image_objs):
     """도판을 채널에 공유하지 않고 올려 두기만 한다 (답변 메세지에 붙인다). 올린 파일 ID와 노션 block_id 목록을 돌려준다."""
@@ -192,11 +201,13 @@ def user_name(client, user_id):
     return _user_names[user_id]
 
 def docs_answered_in_thread(client, channel_id, thread_ts, before_ts):
-    """스레드에서 이 명령 직전의 봇 답변이 참고한 기획서 (답변 끝의 노션 링크로 판별)"""
-    messages = client.conversations_replies(channel=channel_id, ts=thread_ts).get("messages", [])
+    """스레드에서 이 명령 직전의 봇 답변이 참고한 기획서. 답변 메타데이터로 판별하고,
+    메타데이터가 없는 예전 답변은 답변 끝의 노션 링크로 판별한다."""
+    messages = client.conversations_replies(channel=channel_id, ts=thread_ts, include_all_metadata=True).get("messages", [])
     for msg in reversed(messages):
         if "bot_id" in msg and float(msg.get("ts", 0)) < float(before_ts):
-            page_ids = backlog.page_ids_in_text(msg.get("text", ""))
+            payload = answer_payload(msg)
+            page_ids = payload.get("page_ids", []) if payload else backlog.page_ids_in_text(msg.get("text", ""))
             if page_ids:
                 return backlog.linked_docs(page_ids)
     return []
