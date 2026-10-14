@@ -1,5 +1,6 @@
 """슬랙 질문 → 기획서 답변 흐름: 스레드 대화 기록 수집, '분석 중' 메세지를 답변/도판으로 교체"""
 import logging
+import random
 import re
 import requests
 import ai_engine
@@ -60,6 +61,19 @@ def collect_images(candidates, shared_block_ids, limit):
             break
     return collected
 
+# 답변을 만드는 동안 보여주는 '분석 중' 메세지: 이 중 하나를 무작위로 (이모지 하나만 있으면 슬랙이 크게 표시한다)
+PLACEHOLDER_EMOJIS = (
+    ":face_with_rolling_eyes:", ":thinking_face:", ":face_with_raised_eyebrow:", ":persevere:",
+    ":face_with_bags_under_eyes:", ":disguised_face:", ":sunglasses:", ":head_shaking_vertically:",
+    ":thought_balloon:", ":speech_balloon:", ":brain:", ":hourglass_flowing_sand:", ":bellhop_bell:",
+    ":bulb:", ":mag:", ":card_file_box:",
+)
+# 이모지로 바꾸기 전의 '분석 중' 문구 (예전 스레드에 남아 있을 수 있다)
+LEGACY_PLACEHOLDER = "기획서를 읽고 분석 중입니다"
+
+def is_placeholder(text):
+    return text in PLACEHOLDER_EMOJIS or LEGACY_PLACEHOLDER in text
+
 def failure_message(stage, reason, hint):
     return f"❌ 답변을 만들지 못했어요.\n• *실패 단계:* {stage}\n• *원인:* {reason}\n{hint}"
 
@@ -113,7 +127,8 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
                 continue
 
             msg_text = re.sub(r'<@.*?>', '', msg.get("text", "")).strip()
-            if not msg_text or "기획서를 읽고 분석 중입니다" in msg_text:
+            # 답변을 기다리는 중인 다른 질문의 '분석 중' 메세지는 대화 내용이 아니다
+            if not msg_text or is_placeholder(msg_text):
                 continue
             # 백로그 명령/등록 안내는 질문 맥락이 아니므로 대화 기록에서 뺀다
             if msg_text.startswith(backlog.BACKLOG_KEYWORD) or msg_text.startswith(backlog.BACKLOG_CONFIRM_PREFIX):
@@ -132,7 +147,7 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
         return
 
     # '분석 중' 메세지를 답변(또는 실패 안내)으로 바꿔, 스레드에 답변당 메세지 하나만 남긴다
-    placeholder = say(text="🤔 기획서를 읽고 분석 중입니다...", thread_ts=thread_ts)
+    placeholder = say(text=random.choice(PLACEHOLDER_EMOJIS), thread_ts=thread_ts)
     placeholder_ts = sent["placeholder_ts"] = placeholder["ts"]
 
     res = ai_engine.ask_ai_with_history(final_query, chat_history)

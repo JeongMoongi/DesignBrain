@@ -182,6 +182,22 @@ def test_backlog_links_docs_of_previous_answer(monkeypatch, answer, expected):
     assert backlog_slack.docs_answered_in_thread(slack, "D1", "1", "3") == expected
 
 
+def test_placeholder_is_a_single_random_emoji_and_left_out_of_history(monkeypatch):
+    received = ask_recorder(monkeypatch)
+    said = []
+    def say(text, thread_ts=None):
+        said.append(text)
+        return {"ts": "9"}
+    # 다른 질문이 아직 답변을 기다리는 중이라 '분석 중' 이모지(새 형식/예전 문구)가 스레드에 남아 있다
+    slack = HistorySlack([{"ts": "1", "user": "U", "text": "석화체 알려줘"},
+                          {"ts": "2", "bot_id": "B", "text": ":brain:"},
+                          {"ts": "3", "bot_id": "B", "text": "🤔 기획서를 읽고 분석 중입니다..."},
+                          {"ts": "4", "user": "U", "text": "패턴은?"}])
+    slack_service.process_chat_and_reply(slack, say, "D1", "1", "4", "패턴은?")
+    assert said[0] in slack_service.PLACEHOLDER_EMOJIS
+    assert received["history"] == [{"role": "user", "content": "석화체 알려줘"}]
+
+
 def test_top_level_message_starts_new_thread():
     assert slack_service.event_thread_ts({"ts": "100", "channel": "D1", "text": "석화체"}) == "100"
 
