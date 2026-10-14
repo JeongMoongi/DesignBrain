@@ -5,7 +5,8 @@ Wants=network-online.target
 
 [Service]
 User=__USER__
-ExecStart=/usr/bin/ngrok http --url=__NGROK_DOMAIN__ 8000 --log stdout
+# 설치 위치가 환경마다 달라 setup.sh가 실제 경로로 채운다
+ExecStart=__NGROK_BIN__ http --url=__NGROK_DOMAIN__ 8000 --log stdout
 Restart=always
 RestartSec=5
 
