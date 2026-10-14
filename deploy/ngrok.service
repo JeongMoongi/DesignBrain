@@ -1,0 +1,13 @@
+[Unit]
+Description=ngrok 터널 (노션 웹훅 → DesignBrain)
+After=network-online.target designbrain.service
+Wants=network-online.target
+
+[Service]
+User=__USER__
+ExecStart=/usr/bin/ngrok http --url=__NGROK_DOMAIN__ 8000 --log stdout
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

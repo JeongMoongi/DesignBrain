@@ -1,0 +1,16 @@
+[Unit]
+Description=DesignBrain (Slack 기획서 봇 + 노션 웹훅 서버)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__APP_DIR__
+# .env는 config.py가 작업 디렉터리에서 읽는다
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__APP_DIR__/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
