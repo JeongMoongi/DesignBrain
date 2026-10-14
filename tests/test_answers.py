@@ -133,7 +133,7 @@ def test_slack_shows_failure_reason(monkeypatch):
     monkeypatch.setattr(ai_engine, "ask_ai_with_history",
                         lambda q, h: {"status": "error", "stage": "기획서 검색", "reason": "원인", "hint": "안내"})
     said, slack = [], FakeSlack()
-    slack_service.process_chat_and_reply(slack, recorder(said), "C", "1", "<@BOT> 질문")
+    slack_service.process_chat_and_reply(slack, recorder(said), "C", "1", "1", "<@BOT> 질문")
     # 실패 안내는 '분석 중' 메세지를 바꿔서 보여준다
     assert len(said) == 1
     assert slack.updates[-1]["ts"] == "1"
@@ -143,5 +143,5 @@ def test_slack_shows_failure_reason(monkeypatch):
 def test_slack_reports_unexpected_errors(monkeypatch):
     monkeypatch.setattr(ai_engine, "ask_ai_with_history", raiser(ValueError("boom")))
     said = []
-    slack_service.process_chat_and_reply(FakeSlack(), recorder(said), "C", "1", "<@BOT> 질문")
+    slack_service.process_chat_and_reply(FakeSlack(), recorder(said), "C", "1", "1", "<@BOT> 질문")
     assert "메세지 처리" in said[-1] and "ValueError" in said[-1]

@@ -73,10 +73,10 @@ def event_thread_ts(event):
     (스레드 답장을 새 스레드로 잡으면 대화 기록이 비어 후속 질문이 맥락 없이 검색된다)"""
     return event.get("thread_ts") or event.get("ts")
 
-def process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
+def process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text):
     """어떤 단계에서 실패하더라도 사용자가 '분석 중' 메세지만 보고 기다리지 않도록 실패 원인을 스레드에 안내한다"""
     try:
-        _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text)
+        _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text)
     except Exception as e:
         logger.exception("🚨 [Slack] 메세지 처리 실패")
         failure = ai_engine.describe_failure(e)
@@ -85,11 +85,10 @@ def process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
         except Exception:
             logger.exception("🚨 [Slack] 실패 안내 메세지 전송도 실패")
 
-def _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
+def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text):
     cleaned_query = re.sub(r'<@.*?>', '', raw_text).strip()
 
     chat_history = []
-    full_thread_context = []
     shared_block_ids = set()
 
     try:
@@ -98,6 +97,9 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
 
         for msg in messages:
             shared_block_ids.update(shared_image_ids(msg))
+            # 대화 기록은 이 질문 이전까지만 (질문 자신과, 처리 중에 뒤이어 온 메세지는 뺀다)
+            if float(msg.get("ts", 0)) >= float(message_ts):
+                continue
 
             msg_text = re.sub(r'<@.*?>', '', msg.get("text", "")).strip()
             if not msg_text or "기획서를 읽고 분석 중입니다" in msg_text:
@@ -108,14 +110,11 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
 
             role = "user" if "bot_id" not in msg else "assistant"
             chat_history.append({"role": role, "content": msg_text})
-            if role == "user":
-                full_thread_context.append(msg_text)
     except Exception as e:
         logger.info("스레드 히스토리 수집 생략 (DM 또는 단발 메세지): %s", e)
 
-    final_query = cleaned_query
-    if not final_query and full_thread_context:
-        final_query = full_thread_context[-1]
+    # 내용 없이 멘션만 하면 이 스레드의 마지막 질문을 다시 묻는 것으로 본다
+    final_query = cleaned_query or next((h["content"] for h in reversed(chat_history) if h["role"] == "user"), "")
 
     if not final_query:
         say(text="네, 기획자님! 무엇이 궁금하신가요?", thread_ts=thread_ts)
@@ -125,7 +124,7 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
     placeholder = say(text=f"🤔 기획서를 읽고 분석 중입니다...", thread_ts=thread_ts)
     placeholder_ts = placeholder["ts"]
 
-    res = ai_engine.ask_ai_with_history(final_query, chat_history[:-1])
+    res = ai_engine.ask_ai_with_history(final_query, chat_history)
 
     if res.get("status") == "error":
         client.chat_update(channel=channel_id, ts=placeholder_ts,
@@ -350,7 +349,7 @@ def init_slack():
         if request_text is not None:
             handle_backlog_mention(client, say, event, request_text)
             return
-        process_chat_and_reply(client, say, channel_id, thread_ts, text)
+        process_chat_and_reply(client, say, channel_id, thread_ts, event.get("ts"), text)
 
     # 3. 1:1 DM 메세지 처리
     @slack_app.event("message")
@@ -371,7 +370,7 @@ def init_slack():
             if request_text is not None:
                 handle_backlog_mention(client, say, event, request_text)
                 return
-            process_chat_and_reply(client, say, channel_id, thread_ts, user_text)
+            process_chat_and_reply(client, say, channel_id, thread_ts, event.get("ts"), user_text)
 
     # 4. /백로그 커맨드 처리 (슬래시 명령은 스레드 정보가 없어 기획서와 연결하지 않고, 내용 유사도로만 답변에 붙는다)
     @slack_app.command("/백로그")

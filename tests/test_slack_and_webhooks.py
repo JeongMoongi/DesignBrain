@@ -39,7 +39,7 @@ def test_thread_reply_uses_parent_thread_history(monkeypatch):
     event = {"ts": "300", "thread_ts": "100", "channel": "D1", "text": "패턴은 뭐가 있어?"}
     thread_ts = slack_service.event_thread_ts(event)
     assert thread_ts == "100"
-    slack_service.process_chat_and_reply(ThreadSlack(), lambda text, thread_ts=None: {"ts": "400"}, "D1", thread_ts, event["text"])
+    slack_service.process_chat_and_reply(ThreadSlack(), lambda text, thread_ts=None: {"ts": "400"}, "D1", thread_ts, event["ts"], event["text"])
     assert received["query"] == "패턴은 뭐가 있어?"
     assert received["history"] == [{"role": "user", "content": "석화체에 대해 알려줘"},
                                    {"role": "assistant", "content": "석화체는 이착륙 몹입니다."}]
@@ -85,7 +85,7 @@ def run_reply(slack):
     def say(text, thread_ts=None):
         said.append(text)
         return {"ts": "4"}
-    slack_service.process_chat_and_reply(slack, say, "D1", "1", "패턴은?")
+    slack_service.process_chat_and_reply(slack, say, "D1", "1", "3", "패턴은?")
     return said
 
 
@@ -115,6 +115,50 @@ def test_thread_say_posts_directly_without_metadata():
     say = slack_service.thread_say(client, "D1")
     assert say(text="분석 중", thread_ts="1") == {"ts": "9"}
     assert posted == [{"channel": "D1", "text": "분석 중", "thread_ts": "1"}]
+
+
+class HistorySlack:
+    def __init__(self, messages):
+        self.messages = messages
+
+    def conversations_replies(self, **kwargs):
+        return {"messages": self.messages}
+
+    def chat_update(self, **kwargs):
+        pass
+
+
+def ask_recorder(monkeypatch):
+    received = {}
+    def fake_ask(query, history):
+        received.update(query=query, history=history)
+        return {"status": "success", "AI_답변": "답변", "page_ids": [], "images": []}
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", fake_ask)
+    return received
+
+
+def test_history_excludes_current_and_later_messages(monkeypatch):
+    # 질문(ts=3)을 처리하는 동안 다음 질문(ts=4)이 먼저 스레드에 올라와 있어도 대화 기록에 넣지 않는다
+    received = ask_recorder(monkeypatch)
+    slack = HistorySlack([{"ts": "1", "user": "U", "text": "석화체 알려줘"},
+                          {"ts": "2", "bot_id": "B", "text": "석화체 설명"},
+                          {"ts": "3", "user": "U", "text": "패턴은?"},
+                          {"ts": "4", "user": "U", "text": "체력은?"}])
+    slack_service.process_chat_and_reply(slack, lambda text, thread_ts=None: {"ts": "9"}, "D1", "1", "3", "패턴은?")
+    assert received["query"] == "패턴은?"
+    assert received["history"] == [{"role": "user", "content": "석화체 알려줘"},
+                                   {"role": "assistant", "content": "석화체 설명"}]
+
+
+def test_bare_mention_asks_last_question_again(monkeypatch):
+    received = ask_recorder(monkeypatch)
+    slack = HistorySlack([{"ts": "1", "user": "U", "text": "석화체 알려줘"},
+                          {"ts": "2", "bot_id": "B", "text": "석화체 설명"},
+                          {"ts": "3", "user": "U", "text": "<@BOT>"}])
+    slack_service.process_chat_and_reply(slack, lambda text, thread_ts=None: {"ts": "9"}, "C1", "1", "3", "<@BOT>")
+    assert received["query"] == "석화체 알려줘"
+    # 직전 답변이 대화 기록에서 빠지지 않는다
+    assert received["history"][-1] == {"role": "assistant", "content": "석화체 설명"}
 
 
 def test_top_level_message_starts_new_thread():
