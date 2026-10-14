@@ -17,11 +17,6 @@ def test_format_markdown_for_slack(text, expected):
     assert slack_service.format_markdown_for_slack(text) == expected
 
 
-def test_image_filename_carries_block_id():
-    name = slack_service.image_filename({"caption": "도판", "block_id": "2da107d6-982c-8023-9b15-d9d579e43695"})
-    assert slack_service.BLOCK_ID_PATTERN.findall(name) == ["2da107d6-982c-8023-9b15-d9d579e43695"]
-
-
 def test_thread_reply_uses_parent_thread_history(monkeypatch):
     # DM 메인 창의 질문(ts=100) → 봇 답변 스레드 안의 후속 질문(ts=300, thread_ts=100)
     thread = [{"ts": "100", "user": "U", "text": "석화체에 대해 알려줘"},
@@ -29,7 +24,10 @@ def test_thread_reply_uses_parent_thread_history(monkeypatch):
               {"ts": "300", "user": "U", "text": "패턴은 뭐가 있어?"}]
 
     class ThreadSlack:
-        def conversations_replies(self, channel, ts):
+        def chat_update(self, **kwargs):
+            pass
+
+        def conversations_replies(self, channel, ts, **kwargs):
             return {"messages": thread if ts == "100" else [m for m in thread if m["ts"] == ts]}
 
     received = {}
@@ -41,10 +39,82 @@ def test_thread_reply_uses_parent_thread_history(monkeypatch):
     event = {"ts": "300", "thread_ts": "100", "channel": "D1", "text": "패턴은 뭐가 있어?"}
     thread_ts = slack_service.event_thread_ts(event)
     assert thread_ts == "100"
-    slack_service.process_chat_and_reply(ThreadSlack(), lambda text, thread_ts=None: None, "D1", thread_ts, event["text"])
+    slack_service.process_chat_and_reply(ThreadSlack(), lambda text, thread_ts=None: {"ts": "400"}, "D1", thread_ts, event["text"])
     assert received["query"] == "패턴은 뭐가 있어?"
     assert received["history"] == [{"role": "user", "content": "석화체에 대해 알려줘"},
                                    {"role": "assistant", "content": "석화체는 이착륙 몹입니다."}]
+
+
+class AnswerSlack:
+    """이전 답변(도판 b1을 첨부)이 있는 스레드"""
+    def __init__(self, fail_with_files=False):
+        self.updates, self.uploads, self.fail_with_files = [], [], fail_with_files
+
+    def conversations_replies(self, channel, ts, include_all_metadata=False):
+        previous = {"ts": "2", "bot_id": "B", "text": "이전 답변"}
+        if include_all_metadata:
+            previous["metadata"] = {"event_type": slack_service.ANSWER_EVENT_TYPE,
+                                    "event_payload": {"image_block_ids": ["b1"]}}
+        return {"messages": [{"ts": "1", "user": "U", "text": "석화체 알려줘"}, previous,
+                             {"ts": "3", "user": "U", "text": "패턴은?"}]}
+
+    def files_upload_v2(self, **kwargs):
+        self.uploads.append(kwargs)
+        return {"file": {"id": f"F{len(self.uploads)}"}}
+
+    def chat_update(self, **kwargs):
+        if self.fail_with_files and kwargs.get("file_ids"):
+            raise RuntimeError("invalid file")
+        self.updates.append(kwargs)
+
+
+@pytest.fixture
+def answer_with_images(monkeypatch):
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h: {
+        "status": "success", "AI_답변": "**답변**", "page_ids": [],
+        "images": [{"block_id": "b1", "caption": "도판"}, {"block_id": "b2", "caption": "도판"}, {"block_id": "b3", "caption": "도판"}]})
+    monkeypatch.setattr(config, "NOTION_INTEGRATION_TOKEN", "tok")
+    monkeypatch.setattr(slack_service.notion_parser, "fetch_image_by_block_id",
+                        lambda block_id, token: {"block_id": block_id, "caption": "도판", "url": f"https://s3/{block_id}"})
+    monkeypatch.setattr(slack_service.requests, "get",
+                        lambda url, timeout: type("R", (), {"status_code": 200, "content": b"img"})())
+
+
+def run_reply(slack):
+    said = []
+    def say(text, thread_ts=None):
+        said.append(text)
+        return {"ts": "4"}
+    slack_service.process_chat_and_reply(slack, say, "D1", "1", "패턴은?")
+    return said
+
+
+def test_answer_and_new_images_arrive_in_one_message(answer_with_images):
+    slack = AnswerSlack()
+    said = run_reply(slack)
+    # 새 메세지는 '분석 중' 하나뿐이고, 그 메세지가 답변 + 도판으로 바뀐다
+    assert len(said) == 1
+    update = slack.updates[-1]
+    assert update["ts"] == "4" and update["text"] == "*답변*"
+    # 이미 보여준 b1은 건너뛰고 새 도판 2장만 붙인다
+    assert update["file_ids"] == ["F1", "F2"]
+    assert update["metadata"]["event_payload"]["image_block_ids"] == ["b2", "b3"]
+    assert all("channel" not in u for u in slack.uploads)
+
+
+def test_answer_is_sent_even_if_attaching_images_fails(answer_with_images):
+    slack = AnswerSlack(fail_with_files=True)
+    run_reply(slack)
+    assert slack.updates == [{"channel": "D1", "ts": "4", "text": "*답변*"}]
+
+
+def test_thread_say_posts_directly_without_metadata():
+    # Bolt의 say는 스레드 첫 봇 답변의 메타데이터(도판 기록)를 어시스턴트 정보로 읽다 실패하므로 직접 보낸다
+    posted = []
+    client = type("Client", (), {"chat_postMessage": lambda self, **kw: posted.append(kw) or {"ts": "9"}})()
+    say = slack_service.thread_say(client, "D1")
+    assert say(text="분석 중", thread_ts="1") == {"ts": "9"}
+    assert posted == [{"channel": "D1", "text": "분석 중", "thread_ts": "1"}]
 
 
 def test_top_level_message_starts_new_thread():

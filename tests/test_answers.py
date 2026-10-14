@@ -112,20 +112,36 @@ def test_rewrite_failure_falls_back_to_original_query(monkeypatch, openai_client
 
 
 class FakeSlack:
+    def __init__(self):
+        self.updates = []
+
     def conversations_replies(self, **kwargs):
         return {"messages": []}
+
+    def chat_update(self, **kwargs):
+        self.updates.append(kwargs)
+
+
+def recorder(said):
+    def say(text, thread_ts=None):
+        said.append(text)
+        return {"ts": str(len(said))}
+    return say
 
 
 def test_slack_shows_failure_reason(monkeypatch):
     monkeypatch.setattr(ai_engine, "ask_ai_with_history",
                         lambda q, h: {"status": "error", "stage": "기획서 검색", "reason": "원인", "hint": "안내"})
-    said = []
-    slack_service.process_chat_and_reply(FakeSlack(), lambda text, thread_ts=None: said.append(text), "C", "1", "<@BOT> 질문")
-    assert said[-1] == slack_service.failure_message("기획서 검색", "원인", "안내")
+    said, slack = [], FakeSlack()
+    slack_service.process_chat_and_reply(slack, recorder(said), "C", "1", "<@BOT> 질문")
+    # 실패 안내는 '분석 중' 메세지를 바꿔서 보여준다
+    assert len(said) == 1
+    assert slack.updates[-1]["ts"] == "1"
+    assert slack.updates[-1]["text"] == slack_service.failure_message("기획서 검색", "원인", "안내")
 
 
 def test_slack_reports_unexpected_errors(monkeypatch):
     monkeypatch.setattr(ai_engine, "ask_ai_with_history", raiser(ValueError("boom")))
     said = []
-    slack_service.process_chat_and_reply(FakeSlack(), lambda text, thread_ts=None: said.append(text), "C", "1", "<@BOT> 질문")
+    slack_service.process_chat_and_reply(FakeSlack(), recorder(said), "C", "1", "<@BOT> 질문")
     assert "메세지 처리" in said[-1] and "ValueError" in said[-1]

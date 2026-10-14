@@ -24,11 +24,14 @@ def format_markdown_for_slack(text: str) -> str:
     text = text.replace("- 참고 문서:", "• *참고 문서:*")
     return text.strip()
 
-BLOCK_ID_PATTERN = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+# 답변 메세지의 메타데이터에 첨부한 노션 이미지 block_id를 남겨, 같은 스레드에서 같은 도판을 다시 보내지 않는다
+# (업로드 파일명에 넣으면 슬랙이 파일명에서 지워 버린다)
+ANSWER_EVENT_TYPE = "brain_answer"
+IMAGES_PER_ANSWER = 2
 
-def image_filename(img) -> str:
-    """업로드 파일명에 노션 이미지 block_id를 넣어 이후 스레드에서 중복 첨부 여부를 판별"""
-    return f"{img.get('caption', '기획 도판')}_{img.get('block_id')}.jpg"
+def shared_image_ids(message) -> list:
+    payload = (message.get("metadata") or {}).get("event_payload") or {}
+    return payload.get("image_block_ids", [])
 
 def collect_images(candidates, shared_block_ids, limit):
     """검색 순서대로 스레드에 아직 공유되지 않은 이미지를 최대 limit장 수집.
@@ -57,6 +60,13 @@ def collect_images(candidates, shared_block_ids, limit):
 def failure_message(stage, reason, hint):
     return f"❌ 답변을 만들지 못했어요.\n• *실패 단계:* {stage}\n• *원인:* {reason}\n{hint}"
 
+def thread_say(client, channel_id):
+    """Bolt의 say 대신 쓴다. Bolt는 DM 스레드를 AI 어시스턴트 스레드로 보고, 보낼 때마다 스레드 첫 봇 답변의
+    메타데이터를 어시스턴트 정보로 읽다가 답변 메타데이터(도판 기록)를 만나면 KeyError로 실패한다."""
+    def say(text, thread_ts=None):
+        return client.chat_postMessage(channel=channel_id, text=text, thread_ts=thread_ts)
+    return say
+
 def event_thread_ts(event):
     """스레드 하나를 하나의 대화로 다룬다. 스레드 안의 메세지면 부모 스레드, 아니면 그 메세지로 새 스레드를 시작한다.
     (스레드 답장을 새 스레드로 잡으면 대화 기록이 비어 후속 질문이 맥락 없이 검색된다)"""
@@ -82,13 +92,11 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
     shared_block_ids = set()
 
     try:
-        replies = client.conversations_replies(channel=channel_id, ts=thread_ts)
+        replies = client.conversations_replies(channel=channel_id, ts=thread_ts, include_all_metadata=True)
         messages = replies.get("messages", [])
 
         for msg in messages:
-            # 스레드에 이미 첨부된 노션 이미지 추적 (파일 업로드 메세지는 본문이 비어 있으므로 본문 검사보다 먼저 수행)
-            for f in msg.get("files", []):
-                shared_block_ids.update(BLOCK_ID_PATTERN.findall(f.get("name", "")))
+            shared_block_ids.update(shared_image_ids(msg))
 
             msg_text = re.sub(r'<@.*?>', '', msg.get("text", "")).strip()
             if not msg_text or "기획서를 읽고 분석 중입니다" in msg_text:
@@ -112,42 +120,50 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, raw_text):
         say(text="네, 기획자님! 무엇이 궁금하신가요?", thread_ts=thread_ts)
         return
 
-    say(text=f"🤔 기획서를 읽고 분석 중입니다...", thread_ts=thread_ts)
+    # '분석 중' 메세지를 답변(또는 실패 안내)으로 바꿔, 스레드에 답변당 메세지 하나만 남긴다
+    placeholder = say(text=f"🤔 기획서를 읽고 분석 중입니다...", thread_ts=thread_ts)
+    placeholder_ts = placeholder["ts"]
 
     res = ai_engine.ask_ai_with_history(final_query, chat_history[:-1])
 
     if res.get("status") == "error":
-        say(text=failure_message(res["stage"], res["reason"], res["hint"]), thread_ts=thread_ts)
+        client.chat_update(channel=channel_id, ts=placeholder_ts,
+                           text=failure_message(res["stage"], res["reason"], res["hint"]))
         return
 
-    answer = res.get("AI_답변", "")
+    formatted_answer = format_markdown_for_slack(res.get("AI_답변", ""))
+    # 노션 파일 URL은 만료되므로 답변할 때마다 노션에서 새로 받아 슬랙에 올린다
+    image_objs = collect_images(res.get("images", []), shared_block_ids, limit=IMAGES_PER_ANSWER)
+    file_ids, block_ids = upload_images(client, image_objs)
+    metadata = {"event_type": ANSWER_EVENT_TYPE, "event_payload": {"image_block_ids": block_ids}}
+    try:
+        client.chat_update(channel=channel_id, ts=placeholder_ts, text=formatted_answer,
+                           file_ids=file_ids or None, metadata=metadata)
+    except Exception as e:
+        if not file_ids:
+            raise
+        # 도판 때문에 실패했더라도 답변은 전달한다
+        logger.error("🚨 [Slack] 도판을 붙인 답변 전송 실패, 답변만 보냅니다: %s", e)
+        client.chat_update(channel=channel_id, ts=placeholder_ts, text=formatted_answer)
 
-    formatted_answer = format_markdown_for_slack(answer)
-    say(text=formatted_answer, thread_ts=thread_ts)
-
-    # 답변 전송 후, 검색된 문서의 이미지를 노션에서 직접 가져온다 (노션 파일 URL은 만료되므로 DB에 저장하지 않음)
-    image_objs = collect_images(res.get("images", []), shared_block_ids, limit=2)
-
-    # 미공유된 신규 이미지 파일만 최대 2장 슬랙 전송
-    if image_objs:
-        logger.info("📤 [Slack] 신규 연관 기획 도판 %d장 전송", len(image_objs))
-
-        for img in image_objs:
-            img_url = img.get("url")
-            caption = img.get("caption", "기획 도판")
-
-            try:
-                img_res = requests.get(img_url, timeout=15)
-                if img_res.status_code == 200:
-                    client.files_upload_v2(
-                        channel=channel_id,
-                        thread_ts=thread_ts,
-                        file=img_res.content,
-                        filename=image_filename(img),
-                        title=f"📸 {caption}"
-                    )
-            except Exception as img_err:
-                logger.error("🚨 [Slack] 이미지 파일 업로드 실패: %s", img_err)
+def upload_images(client, image_objs):
+    """도판을 채널에 공유하지 않고 올려 두기만 한다 (답변 메세지에 붙인다). 올린 파일 ID와 노션 block_id 목록을 돌려준다."""
+    file_ids, block_ids = [], []
+    for img in image_objs:
+        caption = img.get("caption", "기획 도판")
+        try:
+            img_res = requests.get(img.get("url"), timeout=15)
+            if img_res.status_code != 200:
+                logger.warning("⚠️ [Notion] 도판 다운로드 실패 (HTTP %s, block_id: %s)", img_res.status_code, img.get("block_id"))
+                continue
+            uploaded = client.files_upload_v2(file=img_res.content, filename=f"{caption}.jpg", title=f"📸 {caption}")
+            file_ids.append(uploaded["file"]["id"])
+            block_ids.append(img.get("block_id"))
+        except Exception as img_err:
+            logger.error("🚨 [Slack] 이미지 파일 업로드 실패: %s", img_err)
+    if file_ids:
+        logger.info("📤 [Slack] 신규 연관 기획 도판 %d장 첨부", len(file_ids))
+    return file_ids, block_ids
 
 
 # --- 백로그 ---
@@ -321,9 +337,10 @@ def init_slack():
 
     # 2. 채널 내 @봇 멘션 처리
     @slack_app.event("app_mention")
-    def handle_app_mention_events(body, client, say):
+    def handle_app_mention_events(body, client):
         event = body.get("event", {})
         channel_id = event.get("channel")
+        say = thread_say(client, channel_id)
         thread_ts = event_thread_ts(event)
         text = event.get("text", "")
 
@@ -336,7 +353,7 @@ def init_slack():
 
     # 3. 1:1 DM 메세지 처리
     @slack_app.event("message")
-    def handle_message_events(body, client, say):
+    def handle_message_events(body, client):
         event = body.get("event", {})
         channel_type = event.get("channel_type")
         
@@ -346,6 +363,7 @@ def init_slack():
             user_id = event.get("user")
             channel_id = event.get("channel")
             thread_ts = event_thread_ts(event)
+            say = thread_say(client, channel_id)
 
             logger.info("💬 [DM 수신] 유저(%s): %s", user_id, user_text)
             request_text = backlog_request_text(user_text)
