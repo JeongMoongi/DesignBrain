@@ -2,6 +2,7 @@ import logging
 import re
 import threading
 import uuid
+from itertools import zip_longest
 from typing import List, Dict
 import openai
 from openai import OpenAI
@@ -282,7 +283,6 @@ def _delete_page_points(page_id: str):
 ITEM_NAME_PATTERN = re.compile(r"^- 항목: \[(.+?)\] ➔", re.MULTILINE)
 # '패턴 1'처럼 여러 곳에 있는 이름은 어느 것인지 알 수 없으므로 이름 일치로 쓰지 않는다
 MAX_TARGETS_PER_ALIAS = 3
-NAME_MATCH_PER_TARGET = 8
 NAME_MATCH_TOTAL = 12
 SEARCH_LIMIT = 10
 
@@ -365,17 +365,19 @@ def search_chunks(query: str, query_vector: List[float]) -> tuple:
         # 이름 일치는 보조 수단이므로 목록을 못 만들어도 벡터 검색으로 답변한다 (다음 질문에서 다시 시도)
         logger.warning("⚠️ [이름 목록] 준비 실패, 벡터 검색만 사용합니다: %s", e)
         catalog = {}
-    named = []
+    per_target = []
     for page_id, item in match_names(query, catalog):
         conditions = [FieldCondition(key="page_id", match=MatchValue(value=page_id))]
         if item:
             conditions.append(FieldCondition(key="item", match=MatchValue(value=item)))
-        named.extend(get_qdrant().query_points(
+        per_target.append(get_qdrant().query_points(
             collection_name=COLLECTION_NAME, query=query_vector,
-            query_filter=Filter(must=conditions), limit=NAME_MATCH_PER_TARGET
+            query_filter=Filter(must=conditions), limit=NAME_MATCH_TOTAL
         ).points)
+    # 이름이 여러 개 일치하면 대상별로 번갈아 채워 한 문서가 자리를 독차지하지 않게 한다
     seen = set()
-    named = [p for p in named if not (p.id in seen or seen.add(p.id))][:NAME_MATCH_TOTAL]
+    named = [p for rank in zip_longest(*per_target) for p in rank
+             if p is not None and not (p.id in seen or seen.add(p.id))][:NAME_MATCH_TOTAL]
 
     similar = get_qdrant().query_points(
         collection_name=COLLECTION_NAME,

@@ -123,6 +123,21 @@ def test_missing_used_docs_line_falls_back_to_top_document():
     assert ids(used) == [1, 3]
 
 
+def test_whole_document_fits_and_multiple_names_share_slots(local_db):
+    # 항목 11개짜리 문서도 통째로 들어가고, 이름이 둘 일치하면 번갈아 채운다
+    local_db.upsert(config.COLLECTION_NAME, points=[
+        point(i, "P1", "챕터 2 몹", f"- 항목: [몹{i}] ➔ 설명", vec(1.0, i / 100), item=f"몹{i}") for i in range(11)
+    ] + [point(i, "P2", "게이트", f"게이트 본문 {i}", vec(1.0, i / 100)) for i in range(11)])
+
+    results, named_count = ai_engine.search_chunks("챕터 2 몹 종류 알려줘", vec(1.0))
+    assert {p.payload["item"] for p in results[:named_count]} == {f"몹{i}" for i in range(11)}
+
+    results, named_count = ai_engine.search_chunks("챕터 2 몹과 게이트", vec(1.0))
+    titles = [p.payload["title"] for p in results[:named_count]]
+    assert named_count == ai_engine.NAME_MATCH_TOTAL
+    assert titles.count("챕터 2 몹") == titles.count("게이트") == ai_engine.NAME_MATCH_TOTAL // 2
+
+
 def test_ambiguous_names_are_ignored(local_db):
     local_db.upsert(config.COLLECTION_NAME, points=[
         point(0, f"P{i}", f"미니보스 {i}", "- 항목: [패턴 1] ➔ 설명", vec(1.0), item="패턴 1")
