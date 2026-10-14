@@ -82,6 +82,34 @@ def test_answer_success_appends_source(monkeypatch):
     assert result["page_ids"] == ["p"]
 
 
+HISTORY = [{"role": "user", "content": "디고리 체력이 얼마야?"}, {"role": "assistant", "content": "디고리 체력은 500입니다."}]
+
+
+def test_first_question_is_searched_as_is(monkeypatch):
+    # 스레드 첫 질문은 재작성 호출 없이 그대로 검색한다
+    monkeypatch.setattr(ai_engine, "get_openai", raiser(AssertionError("재작성을 호출하면 안 됩니다")))
+    assert ai_engine.rewrite_search_query("디고리 체력이 얼마야?", []) == "디고리 체력이 얼마야?"
+
+
+def test_follow_up_is_searched_with_rewritten_query(monkeypatch):
+    embedded = []
+    monkeypatch.setattr(ai_engine, "get_embedding", lambda q: embedded.append(q) or [0.0])
+    monkeypatch.setattr(ai_engine, "get_qdrant", lambda: FakeQdrant())
+    monkeypatch.setattr(ai_engine, "get_openai", lambda: fake_openai(reply="디고리의 공격 패턴은 어떻게 돼?"))
+    result = ai_engine.ask_ai_with_history("공격 패턴은 어떻게 돼?", HISTORY)
+    assert result["status"] == "success"
+    assert embedded == ["디고리의 공격 패턴은 어떻게 돼?"]
+
+
+@pytest.mark.parametrize("openai_client", [
+    lambda: fake_openai(error=openai.APITimeoutError(request=REQ)),
+    lambda: fake_openai(reply="  "),
+])
+def test_rewrite_failure_falls_back_to_original_query(monkeypatch, openai_client):
+    monkeypatch.setattr(ai_engine, "get_openai", openai_client)
+    assert ai_engine.rewrite_search_query("공격 패턴은?", HISTORY) == "공격 패턴은?"
+
+
 class FakeSlack:
     def conversations_replies(self, **kwargs):
         return {"messages": []}

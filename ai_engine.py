@@ -297,8 +297,47 @@ def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
         logger.exception("🚨 [답변 실패] 단계: %s | 질문: %s", progress["stage"], query)
         return {"status": "error", "stage": progress["stage"], **describe_failure(e)}
 
+REWRITE_PROMPT = (
+    "너는 기획서 검색어 재작성기다. [대화 기록]과 [마지막 질문]을 보고, 마지막 질문을 대화 맥락 없이도 "
+    "이해되는 완전한 한 문장 질문으로 다시 써라.\n"
+    "- 생략된 대상(문서명, 캐릭터명, 챕터, 시스템명 등)을 대화 기록에서 찾아 채워 넣어라. "
+    "마지막 질문에 무엇에 대한 질문인지(주어)가 없으면 반드시 대화의 주제를 넣어라. "
+    "(예: '아이템 각인은 어떻게 해?' → '비용은 얼마야?' = '아이템 각인 비용은 얼마야?')\n"
+    "- 'X는?'처럼 대상만 바꾼 질문이면, 직전 질문과 같은 내용을 X에 대해 묻는 질문으로 써라. "
+    "X를 직전 대상의 일부로 붙이지 마라. (예: 'A 상점에 뭐가 있어?' → '로비는?' = 'A 로비에는 뭐가 있어?')\n"
+    "- 마지막 질문에 나온 대상(이름, 챕터 번호 등)은 절대 빼거나 다른 것으로 바꾸지 마라. 대화 기록은 빠진 부분을 채우는 데만 써라.\n"
+    "- 마지막 질문이 이미 독립적이면 그대로 출력하라.\n"
+    "- 질문 한 문장만 출력하라."
+)
+# 재작성 입력이 길어지지 않도록 최근 대화만, 긴 답변은 앞부분만 넘긴다
+REWRITE_HISTORY_TURNS = 4
+REWRITE_MESSAGE_CHARS = 500
+
+def rewrite_search_query(query: str, chat_history: List[Dict[str, str]]) -> str:
+    """'그럼 챕터 2는?' 같은 후속 질문을 대화 맥락으로 채워 검색용 질문으로 바꾼다.
+    스레드 첫 질문은 그대로 쓰고, 재작성에 실패해도 원래 질문으로 검색을 이어간다."""
+    if not chat_history:
+        return query
+    history = "\n".join(f"{h.get('role', 'user')}: {h.get('content', '')[:REWRITE_MESSAGE_CHARS]}"
+                        for h in chat_history[-REWRITE_HISTORY_TURNS:])
+    try:
+        completion = get_openai().chat.completions.create(
+            model=config.CHAT_MODEL,
+            messages=[{"role": "system", "content": REWRITE_PROMPT},
+                      {"role": "user", "content": f"[대화 기록]\n{history}\n\n[마지막 질문]\n{query}"}],
+            temperature=0
+        )
+        rewritten = (completion.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.warning("⚠️ [검색어 재작성] 실패, 원래 질문으로 검색합니다: %s", e)
+        return query
+    if not rewritten:
+        return query
+    logger.info("✏️ [검색어 재작성] %s → %s", query, rewritten)
+    return rewritten
+
 def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, str]) -> Dict:
-    query_vector = get_embedding(query)
+    query_vector = get_embedding(rewrite_search_query(query, chat_history))
 
     # 1. 벡터 코사인 유사도 검색 (Threshold 0.25 적용 및 검색 후보 10개 확장)
     progress["stage"] = "기획서 검색"
