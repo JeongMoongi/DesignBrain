@@ -209,7 +209,7 @@ def app_client(monkeypatch):
     monkeypatch.setattr(slack_bot, "stop_slack_bot", lambda: None)
     monkeypatch.setattr(clients, "get_qdrant", lambda: None)
     monkeypatch.setattr(clients, "close_clients", lambda: None)
-    monkeypatch.setattr(indexing, "sync_document_to_db", lambda pid, tok: calls.append(("sync", pid)))
+    monkeypatch.setattr(indexing, "sync_document_to_db", lambda pid, tok, notify=False: calls.append(("sync", pid, notify)))
     monkeypatch.setattr(indexing, "delete_document_from_db", lambda pid: calls.append(("delete", pid)))
     with TestClient(main.app) as client:
         yield client, calls
@@ -230,4 +230,4 @@ def test_webhook_accepts_correct_secret(app_client, monkeypatch):
     headers = {"X-Webhook-Secret": "s3cr3t"}
     assert client.post("/webhook/notion", json={"data": {"id": "p1"}}, headers=headers).status_code == 200
     assert client.post("/webhook/notion/delete", json={"source": {"id": "p2"}}, headers=headers).status_code == 200
-    assert calls == [("sync", "p1"), ("delete", "p2")]
+    assert calls == [("sync", "p1", True), ("delete", "p2")]

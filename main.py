@@ -42,7 +42,7 @@ def webhook_page_id(payload):
 async def notion_webhook_upsert(request: Request, background_tasks: BackgroundTasks):
     page_id = webhook_page_id(await request.json())
     if page_id: 
-        background_tasks.add_task(indexing.sync_document_to_db, page_id, config.NOTION_INTEGRATION_TOKEN)
+        background_tasks.add_task(indexing.sync_document_to_db, page_id, config.NOTION_INTEGRATION_TOKEN, notify=True)
     return {"status": "success"}
 
 @app.post("/webhook/notion/delete", dependencies=[Depends(verify_webhook_secret)])

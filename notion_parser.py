@@ -146,13 +146,16 @@ def fetch_page_text_blocks(block_id, token, column_header=False):
         texts.append(" | ".join(header_cells))
     return "\n".join(texts)
 
-def fetch_database_rows(db_id, db_title, token, images):
+def fetch_database_rows(db_id, db_title, token, images, outline=None, location=""):
     """뷰/DB 타겟 파싱: 엉뚱한 전체 DB 매칭을 방지하고 실제 연결된 DB 쿼리.
-    각 행 페이지의 이미지는 항목 이름(item)과 함께 images에 모아, 그 항목 청크에만 연결되게 한다."""
+    각 행 페이지의 이미지는 항목 이름(item)과 함께 images에 모아, 그 항목 청크에만 연결되게 한다.
+    outline이 있으면 읽을 수 없는 DB(뷰)와 공유되지 않은 관계형 참조를 문서 진단용으로 기록한다."""
     db_contents = []
     
     # 1. Direct DB 쿼리
     results = query_notion_database(db_id, token)
+    if results is None and outline is not None:
+        outline.append(("linked_view", " > ".join(filter(None, [location, db_title or "Untitled"]))))
 
     if results:
         display_title = db_title if db_title else "연관 데이터베이스"
@@ -200,6 +203,10 @@ def fetch_database_rows(db_id, db_title, token, images):
             parsed_line = single_line(f"- 항목: [{row_title}] ➔ {detail_str}")
             logger.debug("   %s", parsed_line[:120] + "..." if len(parsed_line) > 120 else parsed_line)
             db_contents.append(parsed_line)
+
+        unresolved = sum(1 for title in relation_cache.values() if not title)
+        if unresolved and outline is not None:
+            outline.append(("unshared_relation", display_title, unresolved))
             
         return "\n".join(db_contents)
 
@@ -255,12 +262,15 @@ def table_location(headings, parent_path, caption):
             parts.append(part)
     return " > ".join(parts)
 
-def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, headings=None, parent_path=()):
+def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, headings=None, parent_path=(), outline=None):
     """중첩된 블록 재귀적 파싱. 이미지 블록은 images에 block_id/캡션만 모은다 (URL은 만료되므로 저장하지 않음).
-    headings: 문서 순서대로 갱신되는 현재 [제목1, 제목2, 제목3] (재귀 전체가 공유), parent_path: 감싸고 있는 토글 등 부모 블록 텍스트"""
+    headings: 문서 순서대로 갱신되는 현재 [제목1, 제목2, 제목3] (재귀 전체가 공유), parent_path: 감싸고 있는 토글 등 부모 블록 텍스트
+    outline: 문서 진단용으로 블록 순서대로 ("heading", 단계, 제목) / ("content",) / 읽지 못한 것들을 기록한다 (재귀 전체가 공유)"""
     if depth > 5: return
     if headings is None:
         headings = [None, None, None]
+    if outline is None:
+        outline = []
 
     blocks = fetch_block_children(block_id, token)
     if blocks is None:
@@ -282,21 +292,28 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, h
                     level = HEADING_LEVELS[b_type]
                     headings[level:] = [text_content] + [None] * (2 - level)
                     prev_sibling_text = None
+                    outline.append(("heading", level, text_content))
                 else:
                     prev_sibling_text = text_content
+                    outline.append(("content",))
             # 빈 문단(간격용)은 표 제목 판단에 영향을 주지 않는다
 
         # 2. 문서 안의 DB (원본 DB면 행을 항목으로 펼친다. 뷰는 API가 원본을 알려주지 않아 읽을 수 없다)
         elif b_type == "child_database":
-            db_text = fetch_database_rows(b.get("id"), b.get("child_database", {}).get("title", ""), token, images)
+            db_text = fetch_database_rows(b.get("id"), b.get("child_database", {}).get("title", ""), token, images,
+                                          outline, table_location(headings, list(parent_path), None))
             if db_text:
                 full_text_list.append(db_text)
+                outline.append(("content",))
 
         # 2-1. 다른 페이지/DB를 가리키는 링크: 내용은 가져오지 않고 참고 링크로만 남긴다
         elif b_type == "link_to_page":
             reference = link_reference(b.get("link_to_page", {}), token)
             if reference:
                 full_text_list.append(reference)
+                outline.append(("content",))
+            else:
+                outline.append(("unshared_link",))
 
         # 3. 테이블(표) 블록 파싱
         elif b_type == "table":
@@ -306,6 +323,7 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, h
                 caption = prev_sibling_text if prev_sibling_text and len(prev_sibling_text) <= TABLE_CAPTION_MAX_CHARS else None
                 location = table_location(headings, list(parent_path), caption)
                 full_text_list.append(f"\n{table_marker(location)}\n" + table_text)
+                outline.append(("content",))
 
         # 4. 이미지 블록
         elif b_type == "image":
@@ -313,6 +331,7 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, h
             if img["url"]:
                 images.append({"block_id": img["block_id"], "caption": img["caption"],
                                "section": table_location(headings, list(parent_path), None)})
+                outline.append(("content",))
 
         if b_type not in TEXT_BLOCK_TYPES:
             prev_sibling_text = None
@@ -321,7 +340,7 @@ def extract_blocks_recursive(block_id, token, full_text_list, images, depth=0, h
         if has_children and b_type not in NO_RECURSE_TYPES:
             is_label = text_content and b_type not in HEADING_LEVELS and len(text_content) <= TABLE_CAPTION_MAX_CHARS
             child_path = parent_path + (text_content,) if is_label else parent_path
-            extract_blocks_recursive(b.get("id"), token, full_text_list, images, depth + 1, headings, child_path)
+            extract_blocks_recursive(b.get("id"), token, full_text_list, images, depth + 1, headings, child_path, outline)
 
 def fetch_page_images(block_id, token, depth=0, headings=None):
     """페이지 내 이미지 블록 전체 탐색 (DB 행 페이지의 이미지 수집용). 이미지마다 놓인 위치의 제목 경로(section)를 붙인다."""
@@ -428,12 +447,15 @@ def parse_notion_page_deep(page_id, token):
     full_text_list = [f"# {title}"]
 
     images = []
-    extract_blocks_recursive(page_id, token, full_text_list, images)
+    outline = []
+    extract_blocks_recursive(page_id, token, full_text_list, images, outline=outline)
 
     return {
         "page_id": page_id,
         "title": title,
         "path": page_path(page_data, token),
+        # 문서 진단용 구조 기록 (저장하지 않는다)
+        "outline": outline,
         "full_text": "\n\n".join(full_text_list),
         "url": doc_url,
         "images": images

@@ -6,6 +6,7 @@ import uuid
 from typing import List, Dict
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue, HasIdCondition
 import clients
+import doc_diagnosis
 import config
 import notion_parser
 import search
@@ -117,12 +118,13 @@ def _page_lock(page_id: str) -> threading.Lock:
     with _page_locks_guard:
         return _page_locks.setdefault(page_id, threading.Lock())
 
-def sync_document_to_db(page_id: str, notion_token: str):
-    """노션 문서를 파싱해 청크로 나눠 Qdrant에 저장. 휴지통 문서는 저장하지 않고 인덱스에서 제거한다."""
+def sync_document_to_db(page_id: str, notion_token: str, notify: bool = False):
+    """노션 문서를 파싱해 청크로 나눠 Qdrant에 저장. 휴지통 문서는 저장하지 않고 인덱스에서 제거한다.
+    저장한 뒤 문서 진단을 남기고, notify면(웹훅 동기화) 진단할 것이 있을 때 담당자에게 알린다."""
     with _page_lock(page_id):
-        return _sync_document(page_id, notion_token)
+        return _sync_document(page_id, notion_token, notify)
 
-def _sync_document(page_id: str, notion_token: str):
+def _sync_document(page_id: str, notion_token: str, notify: bool = False):
     doc_data = notion_parser.parse_notion_page_deep(page_id, notion_token)
 
     if doc_data and doc_data.get("trashed"):
@@ -191,6 +193,7 @@ def _sync_document(page_id: str, notion_token: str):
     search.invalidate_name_catalog()
 
     logger.info("🎉 [동기화 완료] '%s' (%d개 청크 저장)", title, len(points))
+    doc_diagnosis.run(doc_data, notify_owner=notify)
     return True
 
 
@@ -205,4 +208,8 @@ def _delete_page_points(page_id: str):
         points_selector=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))])
     )
     search.invalidate_name_catalog()
+    try:
+        doc_diagnosis.delete(page_id)
+    except Exception as e:
+        logger.warning("⚠️ [문서 진단] 삭제된 문서의 진단 기록 정리 실패: %s", e)
     logger.info("🗑️ [삭제 완료] page_id: %s 의 청크를 Qdrant에서 제거했습니다.", page_id)

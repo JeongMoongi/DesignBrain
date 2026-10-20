@@ -33,6 +33,9 @@ QA_LOG_COLLECTION = "qa_logs"
 QA_REPORT_USER_ID = os.environ.get("QA_REPORT_USER_ID")
 QA_REPORT_WEEKDAY = 0
 QA_REPORT_HOUR = 10
+# 문서 진단 결과 (문서마다 최신 하나, 벡터 없음). 웹훅 동기화에서 진단할 것이 있으면 이 슬랙 사용자에게 DM (기본: 질문 기록 요약 받는 사람)
+DIAGNOSIS_COLLECTION = "doc_diagnoses"
+DIAGNOSIS_REPORT_USER_ID = os.environ.get("DIAGNOSIS_REPORT_USER_ID") or QA_REPORT_USER_ID
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
