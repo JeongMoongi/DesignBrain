@@ -380,6 +380,34 @@ def is_page_trashed(page_id, token):
         raise RuntimeError(f"노션 페이지 상태 확인 실패 (page_id: {page_id})")
     return is_trashed(page_data)
 
+# 경로를 찾을 때 거슬러 올라가는 최대 단계 (워크스페이스 최상위에 닿으면 그 전에 멈춘다)
+PATH_MAX_DEPTH = 10
+
+def fetch_object(kind, obj_id, token):
+    """상위 객체(page/database/block) 조회. 연동에 공유되지 않았거나 실패하면 None"""
+    endpoint = {"page_id": "pages", "database_id": "databases", "block_id": "blocks"}[kind]
+    res = requests.get(f"https://api.notion.com/v1/{endpoint}/{obj_id}", headers=get_headers(token), timeout=15)
+    return res.json() if res.status_code == 200 else None
+
+def page_path(page_data, token):
+    """페이지가 노션 어디에 있는지: 상위 페이지/DB 제목 목록 (먼 쪽부터). 예: ['영웅 목록', '디고리'].
+    '전투 요소'처럼 여러 곳에 같은 제목이 있는 페이지를 구분하는 데 쓴다. 공유되지 않은 상위를 만나면 거기서 멈춘다.
+    DB 행의 DB 이름이 그 DB를 담은 페이지 제목과 같으면 한 번만 넣는다."""
+    titles = []
+    parent = page_data.get("parent", {})
+    for _ in range(PATH_MAX_DEPTH):
+        kind = parent.get("type")
+        if kind not in ("page_id", "database_id", "block_id"):
+            break
+        data = fetch_object(kind, parent[kind], token)
+        if data is None:
+            break
+        title = page_title(data) if kind == "page_id" else plain_text(data.get("title", [])) if kind == "database_id" else ""
+        if title and (not titles or titles[0] != title):
+            titles.insert(0, title)
+        parent = data.get("parent", {})
+    return titles
+
 def parse_notion_page_deep(page_id, token):
     """페이지 전체 파싱. 조회 실패 시 None, 휴지통 문서는 본문을 읽지 않고 {"trashed": True}를 반환한다."""
     page_data = fetch_page(page_id, token)
@@ -405,6 +433,7 @@ def parse_notion_page_deep(page_id, token):
     return {
         "page_id": page_id,
         "title": title,
+        "path": page_path(page_data, token),
         "full_text": "\n\n".join(full_text_list),
         "url": doc_url,
         "images": images

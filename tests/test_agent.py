@@ -129,3 +129,35 @@ def test_answer_mode_switches_to_agent(monkeypatch):
     monkeypatch.setattr(config, "ANSWER_MODE", "agent")
     monkeypatch.setattr(agent, "ask_agent", lambda query, history, progress, on_progress: {"status": "success", "AI_답변": "에이전트"})
     assert ai_engine.ask_ai_with_history("질문", [])["AI_답변"] == "에이전트"
+
+
+@pytest.fixture
+def hero_docs(local_db, monkeypatch):
+    """세 영웅 아래에 같은 제목 '전투 요소' 문서가 있는 인덱스"""
+    monkeypatch.setattr(clients, "get_embedding", lambda text: VECTOR)
+    monkeypatch.setattr(backlog, "notes_for_answer", lambda vector, page_ids: [])
+    heroes = ["디고리", "카일린"]
+    local_db.upsert(config.COLLECTION_NAME, [
+        PointStruct(id=i + 1, vector=VECTOR, payload={
+            "page_id": f"H{i}", "chunk_idx": 0, "title": "전투 요소", "path": f"영웅 인증 페이지 > 영웅 목록 > {hero}",
+            "text": f"문서: 전투 요소 (위치: 영웅 인증 페이지 > 영웅 목록 > {hero})\n{hero}의 스킬", "url": f"https://notion/H{i}", "images": []})
+        for i, hero in enumerate(heroes)])
+    search.invalidate_name_catalog()
+    return local_db
+
+
+def test_same_title_in_different_places_is_named_by_parent(hero_docs):
+    state = agent.AgentState(None)
+    assert agent.tool_list_docs(state) == "- 디고리 > 전투 요소\n- 카일린 > 전투 요소"
+    assert agent.tool_read_document(state, "카일린 > 전투 요소") == "[문서: 카일린 > 전투 요소]\n카일린의 스킬"
+    # 검색 결과에도 읽을 때 쓰는 이름이 붙고, 머리줄(문서/위치)은 빠진다
+    results = agent.tool_search_docs(state, "스킬").split("\n\n")
+    assert sorted(results) == ["[디고리 > 전투 요소]\n디고리의 스킬", "[카일린 > 전투 요소]\n카일린의 스킬"]
+
+
+def test_links_and_citations_use_parent_for_same_titles(hero_docs, fake_responses):
+    fake_responses(response([call("search_docs", query="스킬")], id="r1"),
+                   response(text="두 영웅의 스킬\n사용한 문서: 디고리 > 전투 요소 | 카일린 > 전투 요소", id="r2"))
+    result = agent.ask_agent("스킬 알려줘", [], {}, None)
+    assert "[디고리 > 전투 요소](https://notion/H0)" in result["AI_답변"]
+    assert "[카일린 > 전투 요소](https://notion/H1)" in result["AI_답변"]

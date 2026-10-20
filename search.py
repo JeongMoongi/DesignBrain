@@ -79,8 +79,8 @@ def invalidate_name_catalog():
         _name_catalog = None
 
 def _get_catalogs() -> tuple:
-    """(별칭 → {(page_id, item)}, 제목 → {"page_ids", "items"}). item이 빈 문자열이면 문서 전체.
-    제목이 같은 서로 다른 페이지('아이템' DB 문서와 아이콘 경로만 있는 '아이템' 페이지 등)는 한 문서로 묶는다.
+    """(별칭 → {(page_id, item)}, 문서 이름 → {"page_ids", "items", "path"}). item이 빈 문자열이면 문서 전체.
+    문서 이름은 보통 제목이고, 제목이 같은 페이지가 노션의 서로 다른 곳에 있으면 '디고리 > 전투 요소'처럼 상위 이름을 붙인다.
     동기화/삭제 후 다음 질문에서 다시 만든다."""
     global _name_catalog
     with _name_catalog_lock:
@@ -88,23 +88,21 @@ def _get_catalogs() -> tuple:
         if _name_catalog is not None and _name_catalog[0] is qdrant:
             return _name_catalog[1], _name_catalog[2]
         targets = set()
-        documents = {}
+        pages = {}
         offset = None
         while True:
             points, offset = qdrant.scroll(collection_name=config.COLLECTION_NAME, limit=256, offset=offset,
-                                                 with_payload=["page_id", "title", "item", "chunk_idx"], with_vectors=False)
+                                                 with_payload=["page_id", "title", "item", "chunk_idx", "path"], with_vectors=False)
             for p in points:
                 page_id = p.payload.get("page_id")
                 if not page_id:
                     continue
                 title = p.payload.get("title", "")
                 targets.add((page_id, "", title))
-                doc = documents.setdefault(title, {"page_ids": [], "items": {}})
-                if page_id not in doc["page_ids"]:
-                    doc["page_ids"].append(page_id)
+                page = pages.setdefault(page_id, {"payload": p.payload, "items": {}})
                 if p.payload.get("item"):
                     targets.add((page_id, p.payload["item"], p.payload["item"]))
-                    doc["items"].setdefault(p.payload["item"], p.payload.get("chunk_idx", 0))
+                    page["items"].setdefault(p.payload["item"], p.payload.get("chunk_idx", 0))
             if offset is None:
                 break
         catalog = {}
@@ -112,18 +110,44 @@ def _get_catalogs() -> tuple:
             for alias in name_aliases(name):
                 catalog.setdefault(alias, set()).add((page_id, item))
         catalog = {alias: t for alias, t in catalog.items() if len(t) <= MAX_TARGETS_PER_ALIAS}
-        # 항목은 문서 안의 순서대로
-        for doc in documents.values():
-            doc["items"] = sorted(doc["items"], key=doc["items"].get)
+        documents = build_documents(pages)
         _name_catalog = (qdrant, catalog, documents)
         logger.info("📇 [이름 목록] 별칭 %d개, 문서 %d개 준비", len(catalog), len(documents))
         return catalog, documents
+
+def parent_title(payload) -> str:
+    path = payload.get("path", "")
+    return path.split(" > ")[-1] if path else ""
+
+def qualified_name(payload) -> str:
+    """'디고리 > 전투 요소'처럼 바로 위 상위 이름을 붙인 문서 이름 (상위를 모르면 제목만)"""
+    title, parent = payload.get("title", ""), parent_title(payload)
+    return f"{parent} > {title}" if parent else title
+
+def build_documents(pages: Dict[str, dict]) -> Dict[str, dict]:
+    """page_id → {"payload", "items"(항목 → 첫 청크 번호)}를 문서 이름 → {"page_ids", "items", "path"}로 묶는다.
+    제목이 같아도 상위가 같으면 한 문서로 본다."""
+    by_title = {}
+    for page_id, page in pages.items():
+        by_title.setdefault(page["payload"].get("title", ""), []).append(page_id)
+    documents = {}
+    for title, page_ids in by_title.items():
+        ambiguous = len({parent_title(pages[pid]["payload"]) for pid in page_ids}) > 1
+        for page_id in page_ids:
+            payload = pages[page_id]["payload"]
+            doc = documents.setdefault(qualified_name(payload) if ambiguous else title,
+                                       {"page_ids": [], "items": [], "path": payload.get("path", "")})
+            doc["page_ids"].append(page_id)
+            # 항목은 문서 안의 순서대로
+            items = pages[page_id]["items"]
+            doc["items"] += sorted(items, key=items.get)
+    return documents
 
 def _get_name_catalog() -> Dict[str, set]:
     return _get_catalogs()[0]
 
 def get_documents() -> Dict[str, dict]:
-    """인덱스된 문서 목록: 제목 → {"page_ids", "items"(DB 항목 이름, 문서 안 순서)}"""
+    """인덱스된 문서 목록: 문서 이름 → {"page_ids", "items"(DB 항목 이름, 문서 안 순서), "path"}"""
     return _get_catalogs()[1]
 
 def match_names(query: str, catalog: Dict[str, set]) -> List[tuple]:

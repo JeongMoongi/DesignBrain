@@ -59,8 +59,15 @@ def split_long_unit(unit: str) -> List[str]:
     pieces = [p[i:i + limit] for p in pieces for i in range(0, len(p), limit)]
     return [pieces[0]] + [head + p for p in pieces[1:]]
 
-def split_into_chunks(title: str, full_text: str) -> List[str]:
-    doc_header = f"문서: {title}"
+# 청크 머리줄에 넣는 경로 단계 수 (가까운 상위부터). '전투 요소'가 어느 영웅의 것인지 같은 소속이 검색에도 반영되게 한다
+PATH_IN_HEADER = 3
+
+def chunk_header(title: str, path: List[str] = ()) -> str:
+    location = f" (위치: {' > '.join(path[-PATH_IN_HEADER:])})" if path else ""
+    return f"문서: {title}{location}"
+
+def split_into_chunks(title: str, full_text: str, path: List[str] = ()) -> List[str]:
+    doc_header = chunk_header(title, path)
     chunks = []
     text_lines = []
     in_unit_section = False
@@ -133,7 +140,8 @@ def _sync_document(page_id: str, notion_token: str):
     logger.info("📄 [동기화] '%s' 파싱 완료 (%d자)", title, len(full_text))
     logger.debug("▼ [파싱 원문: %s]\n%s\n▲ [파싱 원문 끝]", title, full_text)
 
-    chunks = split_into_chunks(title, full_text)
+    path = doc_data.get("path", [])
+    chunks = split_into_chunks(title, full_text, path)
 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("🧩 [청크 %d개: %s]\n%s", len(chunks), title,
@@ -148,6 +156,8 @@ def _sync_document(page_id: str, notion_token: str):
         payload = {
             "page_id": page_id,
             "title": title,
+            # 노션 안의 위치 (상위 페이지/DB 제목, 먼 쪽부터). 같은 제목의 다른 문서를 구분하는 데 쓴다
+            "path": " > ".join(path),
             "text": chunk,
             "url": doc_data.get("url", ""),
             "chunk_idx": idx,

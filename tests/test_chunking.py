@@ -68,3 +68,9 @@ def test_short_unit_is_untouched():
 def test_chunk_point_id_is_stable():
     assert indexing.chunk_point_id("page", 3) == indexing.chunk_point_id("page", 3)
     assert indexing.chunk_point_id("page", 3) != indexing.chunk_point_id("page", 4)
+
+
+def test_chunk_header_includes_nearest_path():
+    chunks = indexing.split_into_chunks("전투 요소", "# 전투 요소\n본문", ["워크스페이스", "영웅 인증 페이지", "영웅 목록", "디고리"])
+    assert chunks == ["문서: 전투 요소 (위치: 영웅 인증 페이지 > 영웅 목록 > 디고리)\n# 전투 요소\n본문"]
+    assert indexing.split_into_chunks("문서", "본문") == ["문서: 문서\n본문"]

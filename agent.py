@@ -91,10 +91,15 @@ class AgentState:
 
 
 def chunk_body(payload) -> str:
-    """청크 앞의 '문서: 제목' 머리줄은 도구 결과에 제목을 따로 붙이므로 뗀다"""
+    """청크 앞의 '문서: 제목 (위치: …)' 머리줄은 도구 결과에 문서 이름을 따로 붙이므로 뗀다"""
     text = payload.get("text", "")
-    header = f"문서: {payload.get('title', '')}\n"
-    return text[len(header):] if text.startswith(header) else text
+    first, _, rest = text.partition("\n")
+    return rest if first.startswith("문서: ") else text
+
+
+def document_names() -> Dict[str, str]:
+    """page_id → 문서 이름 (list_docs/read_document에서 쓰는 이름. 같은 제목이 여러 곳에 있으면 상위 이름이 붙는다)"""
+    return {page_id: name for name, doc in search.get_documents().items() for page_id in doc["page_ids"]}
 
 
 def tool_search_docs(state: AgentState, query: str) -> str:
@@ -106,10 +111,11 @@ def tool_search_docs(state: AgentState, query: str) -> str:
     state.add_hits(results)
     if not results:
         return "검색 결과 없음"
+    names = document_names()
     lines = []
     for hit in results:
         p = hit.payload
-        where = p.get("title", "무제") + (f" > {p['item']}" if p.get("item") else "")
+        where = names.get(p.get("page_id"), p.get("title", "무제")) + (f" > {p['item']}" if p.get("item") else "")
         lines.append(f"[{where}]\n{chunk_body(p)[:SEARCH_RESULT_CHARS]}")
     return "\n\n".join(lines)
 

@@ -170,3 +170,22 @@ def test_page_state_check_failure_raises(monkeypatch, no_network):
     monkeypatch.setattr(np, "fetch_page", lambda page_id, token: None)
     with pytest.raises(RuntimeError):
         np.is_page_trashed("p", "tok")
+
+
+def test_page_path_walks_up_parents(monkeypatch, no_network):
+    def title(text):
+        return {"n": {"type": "title", "title": rt(text)}}
+    objects = {
+        ("page_id", "hero"): {"properties": title("디고리"), "parent": {"type": "database_id", "database_id": "db"}},
+        # DB 이름이 그 DB를 담은 페이지 제목과 같으면 한 번만 넣는다
+        ("database_id", "db"): {"title": rt("영웅 목록"), "parent": {"type": "block_id", "block_id": "blk"}},
+        ("block_id", "blk"): {"parent": {"type": "page_id", "page_id": "list"}},
+        ("page_id", "list"): {"properties": title("영웅 목록"), "parent": {"type": "page_id", "page_id": "root"}},
+        ("page_id", "root"): {"properties": title("영웅 인증 페이지"), "parent": {"type": "workspace", "workspace": True}},
+    }
+    monkeypatch.setattr(np, "fetch_object", lambda kind, obj_id, token: objects.get((kind, obj_id)))
+    page = {"parent": {"type": "page_id", "page_id": "hero"}}
+    assert np.page_path(page, "tok") == ["영웅 인증 페이지", "영웅 목록", "디고리"]
+    # 연동에 공유되지 않은 상위를 만나면 거기까지만
+    objects.pop(("page_id", "root"))
+    assert np.page_path(page, "tok") == ["영웅 목록", "디고리"]

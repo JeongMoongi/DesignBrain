@@ -1,6 +1,7 @@
 """기획서 Q&A 답변 생성: 검색(search) 결과로 GPT 답변을 만들고, 사용한 문서/도판/백로그 참고 문구를 붙인다"""
 import logging
 import re
+from collections import Counter
 from typing import Callable, List, Dict
 import openai
 from qdrant_client.http import exceptions as qdrant_exceptions
@@ -77,7 +78,9 @@ def split_used_docs(reply: str, search_results: list) -> tuple:
         top_page = search_results[0].payload.get("page_id")
         return reply, [hit for hit in search_results if hit.payload.get("page_id") == top_page]
     cited = {search.normalize_name(title.strip(MARKDOWN_MARKS)) for title in match.group(1).split("|")}
-    used = [hit for hit in search_results if search.normalize_name(hit.payload.get("title", "")) in cited]
+    # 제목으로도, '디고리 > 전투 요소'처럼 상위 이름을 붙인 이름으로도 적을 수 있다
+    used = [hit for hit in search_results
+            if {search.normalize_name(hit.payload.get("title", "")), search.normalize_name(search.qualified_name(hit.payload))} & cited]
     logger.info("📎 [사용한 문서] %s", match.group(1).strip(MARKDOWN_MARKS))
     return "\n".join(lines[:-1]).rstrip(), used
 
@@ -163,9 +166,11 @@ def finish_answer(query: str, raw_reply: str, hits: list, image_hits: list, sear
     if notes:
         ai_reply += "\n\n" + "\n".join(f"📌 참고 : {note}" for note in notes)
 
-    # 검색 순서를 유지하며 문서당 링크 하나
-    doc_urls = list(dict.fromkeys(f"[{hit.payload.get('title', '무제')}]({hit.payload['url']})"
-                                  for hit in used_hits if hit.payload.get("url")))
+    # 검색 순서를 유지하며 문서당 링크 하나. 제목이 같은 다른 문서가 함께 있으면 상위 이름을 붙여 구분한다
+    linked = list({hit.payload["url"]: hit.payload for hit in reversed(used_hits) if hit.payload.get("url")}.values())[::-1]
+    title_counts = Counter(p.get("title", "무제") for p in linked)
+    doc_urls = [f"[{search.qualified_name(p) if title_counts[p.get('title', '무제')] > 1 else p.get('title', '무제')}]({p['url']})"
+                for p in linked]
     if doc_urls:
         ai_reply += "\n\n- 참고 문서 : " + ", ".join(doc_urls)
 
