@@ -57,6 +57,9 @@ def rewrite_search_query(query: str, chat_history: List[Dict[str, str]]) -> str:
 MAX_TARGETS_PER_ALIAS = 3
 NAME_MATCH_TOTAL = 12
 SEARCH_LIMIT = 10
+# 이름 일치 결과가 많아도('상점 아이템 가격' → '상점', '아이템' 문서) 유사도 검색 결과를 이만큼은 함께 넣는다.
+# 질문에 이름이 나온 문서가 아니라 다른 문서에 답이 있는 경우를 놓치지 않기 위함
+SIMILAR_RESERVED = 4
 
 def normalize_name(text: str) -> str:
     return re.sub(r"\s+", "", text).lower()
@@ -200,4 +203,4 @@ def search_chunks(query: str, query_vector: List[float]) -> tuple:
     if named:
         logger.info("📇 [이름 일치] %d개 청크를 먼저 사용", len(named))
     combined = named + [p for p in similar if p.id not in seen]
-    return combined[:max(SEARCH_LIMIT, len(named))], len(named)
+    return combined[:max(SEARCH_LIMIT, len(named) + SIMILAR_RESERVED)], len(named)
