@@ -139,6 +139,22 @@ def test_database_item_is_single_line(monkeypatch, fake_notion):
     assert images == [{"block_id": "img1", "caption": "포자 도판", "section": "Spore", "item": "포자"}]
 
 
+def test_database_relation_shows_linked_page_titles(monkeypatch, fake_notion):
+    rows = [{"id": f"r{i}", "properties": {
+        "이름": {"type": "title", "title": rt(name)},
+        "각인": {"type": "relation", "relation": [{"id": ref} for ref in refs]},
+    }} for i, (name, refs) in enumerate([("맹세의 서", ["e1", "gone", "private"]), ("양말", ["e1"])])]
+    monkeypatch.setattr(np, "query_notion_database", lambda db_id, token: rows)
+    pages = {"e1": {"properties": {"n": {"type": "title", "title": rt("협공")}}},
+             "gone": {"in_trash": True, "properties": {"n": {"type": "title", "title": rt("폐기")}}}}
+    fetched = []
+    monkeypatch.setattr(np, "fetch_page", lambda page_id, token: fetched.append(page_id) or pages.get(page_id))
+    text = np.fetch_database_rows("db", "아이템 목록", "tok", [])
+    assert text.strip("\n").split("\n")[1:] == ["- 항목: [맹세의 서] ➔ 각인='협공'", "- 항목: [양말] ➔ 각인='협공'"]
+    # 여러 행이 가리키는 같은 페이지는 한 번만 조회한다
+    assert fetched == ["e1", "gone", "private"]
+
+
 @pytest.mark.parametrize("page,expected", [
     ({"in_trash": True, "archived": False}, True),
     ({"in_trash": False, "archived": True}, True),

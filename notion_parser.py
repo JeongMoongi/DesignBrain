@@ -81,6 +81,22 @@ def parse_property_value(prop):
         return "True" if prop.get("checkbox") else "False"
     return ""
 
+def page_title(page_data):
+    return next((plain_text(v.get("title", [])) for v in page_data.get("properties", {}).values() if v.get("type") == "title"), "")
+
+def relation_titles(prop, token, cache):
+    """관계형 속성이 가리키는 페이지들의 제목 (예: 아이템의 각인='협공'). 조회할 수 없거나 휴지통인 페이지는 뺀다.
+    같은 DB의 여러 행이 같은 페이지를 가리키는 경우가 많아 cache(page_id → 제목)로 한 번만 조회한다."""
+    titles = []
+    for ref in prop.get("relation", []):
+        ref_id = ref.get("id")
+        if ref_id not in cache:
+            data = fetch_page(ref_id, token)
+            cache[ref_id] = page_title(data) if data and not is_trashed(data) else ""
+        if cache[ref_id]:
+            titles.append(cache[ref_id])
+    return ", ".join(titles)
+
 def query_notion_database(db_id, token):
     return fetch_all_pages("POST", f"https://api.notion.com/v1/databases/{db_id}/query", token)
 
@@ -143,6 +159,7 @@ def fetch_database_rows(db_id, db_title, token, images):
         logger.debug("📊 [DB 파싱] %s (%d행)", display_title, len(results))
         db_contents.append(f"\n\n{DB_MARKER_PREFIX} {display_title}] ###")
         
+        relation_cache = {}
         for row in results:
             row_id = row.get("id")
             row_props = row.get("properties", {})
@@ -150,7 +167,10 @@ def fetch_database_rows(db_id, db_title, token, images):
             row_details = []
             
             for k, v in row_props.items():
-                parsed_val = parse_property_value(v)
+                if v.get("type") == "relation":
+                    parsed_val = relation_titles(v, token, relation_cache)
+                else:
+                    parsed_val = parse_property_value(v)
                 if parsed_val:
                     if v.get("type") == "title":
                         row_title = parsed_val
@@ -206,7 +226,7 @@ def link_reference(link, token):
     if is_trashed(data):
         return None
     if kind == "page_id":
-        title = next((plain_text(v.get("title", [])) for v in data.get("properties", {}).values() if v.get("type") == "title"), "")
+        title = page_title(data)
     else:
         title = plain_text(data.get("title", []))
     return f"{LINK_REFERENCE_PREFIX} [{title or '제목 없음'}]({data.get('url', '')})"
