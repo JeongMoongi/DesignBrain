@@ -110,7 +110,7 @@ def recorder(said):
 
 def test_slack_shows_failure_reason(monkeypatch):
     monkeypatch.setattr(ai_engine, "ask_ai_with_history",
-                        lambda q, h: {"status": "error", "stage": "기획서 검색", "reason": "원인", "hint": "안내"})
+                        lambda q, h, on_progress=None: {"status": "error", "stage": "기획서 검색", "reason": "원인", "hint": "안내"})
     said, slack = [], FakeSlack()
     slack_service.process_chat_and_reply(slack, recorder(said), "C", "1", "1", "<@BOT> 질문")
     # 실패 안내는 '분석 중' 메세지를 바꿔서 보여준다
@@ -136,3 +136,18 @@ def test_slack_reports_errors_as_new_message_when_update_fails(monkeypatch):
     said = []
     slack_service.process_chat_and_reply(slack, recorder(said), "C", "1", "1", "<@BOT> 질문")
     assert len(said) == 2 and "ValueError" in said[-1]
+
+
+def test_slack_shows_agent_progress_in_placeholder(monkeypatch):
+    def fake_ask(q, h, on_progress=None):
+        on_progress("🔍 '석화체' 검색 중…")
+        return {"status": "success", "AI_답변": "답변", "page_ids": [], "images": []}
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", fake_ask)
+    said, slack = [], FakeSlack()
+    slack_service.process_chat_and_reply(slack, recorder(said), "C", "1", "1", "<@BOT> 질문")
+    progress, answer = slack.updates
+    assert progress["text"] == f"{said[0]} 🔍 '석화체' 검색 중…"
+    # 진행 표시 중인 메세지도 '분석 중'으로 보고 다른 질문의 대화 기록에서 뺀다
+    assert slack_service.is_placeholder(progress["text"])
+    assert not slack_service.is_placeholder("답변 :brain: 입니다")
+    assert answer["text"] == "답변"

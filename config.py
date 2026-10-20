@@ -37,3 +37,10 @@ QA_REPORT_HOUR = 10
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
 CHAT_MODEL = "gpt-4o-mini"
+
+# 답변 방식: classic = 검색 1회 후 CHAT_MODEL로 답변, agent = AGENT_MODEL이 도구로 기획서를 직접 찾아가며 답변 (agent.py)
+ANSWER_MODE = os.environ.get("ANSWER_MODE", "classic")
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "gpt-6-luna")
+AGENT_REASONING_EFFORT = os.environ.get("AGENT_REASONING_EFFORT", "medium")
+# 에이전트가 답하기 전에 도구를 부를 수 있는 최대 횟수 (넘으면 모은 자료로 바로 답하게 한다)
+AGENT_MAX_TOOL_ROUNDS = 8

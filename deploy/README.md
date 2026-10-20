@@ -71,3 +71,13 @@ PC와 VM이 동시에 돌면 같은 ngrok 도메인을 두고 다투고 리마�
 
 서버와 ngrok은 VM이 재부팅되어도 자동으로 시작되고, 죽으면 5초 뒤 다시 시작된다.
 `.env`를 바꾼 뒤에는 재시작해야 반영된다.
+
+### 답변 방식 (`.env`)
+
+| 설정 | 기본값 | 설명 |
+|---|---|---|
+| `ANSWER_MODE` | `classic` | `agent`로 바꾸면 모델이 기획서를 직접 찾아가며 답한다 (agent.py) |
+| `AGENT_MODEL` | `gpt-6-luna` | 에이전트 모델 (예: `gpt-6.1-sol`) |
+| `AGENT_REASONING_EFFORT` | `medium` | 추론 강도 (`low` / `medium` / `high`) |
+
+바꾸기 전에 PC에서 `python eval_agent.py --mode agent --model <모델>`로 평가해 비교할 수 있다.

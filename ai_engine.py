@@ -1,7 +1,7 @@
 """기획서 Q&A 답변 생성: 검색(search) 결과로 GPT 답변을 만들고, 사용한 문서/도판/백로그 참고 문구를 붙인다"""
 import logging
 import re
-from typing import List, Dict
+from typing import Callable, List, Dict
 import openai
 from qdrant_client.http import exceptions as qdrant_exceptions
 import backlog
@@ -42,11 +42,16 @@ def describe_failure(e: Exception) -> Dict[str, str]:
         return {"reason": "기획서 DB(Qdrant)에 연결하지 못했습니다.", "hint": RETRY_HINT}
     return {"reason": f"예상하지 못한 오류가 발생했습니다. ({type(e).__name__})", "hint": ADMIN_HINT}
 
-def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]]) -> Dict:
-    """Qdrant Cloud 벡터 검색 후 OpenAI GPT 답변 생성. 도판은 검색된 images(block_id 목록)로 호출부에서 노션에서 직접 가져온다.
+def ask_ai_with_history(query: str, chat_history: List[Dict[str, str]], on_progress: Callable[[str], None] = None) -> Dict:
+    """기획서를 근거로 답변 생성. config.ANSWER_MODE가 agent면 모델이 도구로 자료를 직접 찾아가며 답하고(agent.py),
+    classic이면 검색 1회 후 답한다. 도판은 images(block_id 목록)로 호출부에서 노션에서 직접 가져온다.
+    on_progress는 에이전트가 자료를 찾는 동안 진행 상황 문구를 받는다.
     실패하면 status=error 와 함께 실패 단계(stage), 원인(reason), 대처 안내(hint)를 돌려준다."""
     progress = {"stage": "질문 분석"}
     try:
+        if config.ANSWER_MODE == "agent":
+            import agent
+            return agent.ask_agent(query, chat_history, progress, on_progress)
         return _ask_ai(query, chat_history, progress)
     except Exception as e:
         logger.exception("🚨 [답변 실패] 단계: %s | 질문: %s", progress["stage"], query)
@@ -66,6 +71,8 @@ def split_used_docs(reply: str, search_results: list) -> tuple:
     lines = reply.rstrip().split("\n")
     match = USED_DOCS_PATTERN.match(lines[-1].strip()) if lines else None
     if not match:
+        if not search_results:
+            return reply, []
         logger.info("📎 [사용한 문서] 표시가 없어 검색 1위 문서만 참고 문서로 씁니다.")
         top_page = search_results[0].payload.get("page_id")
         return reply, [hit for hit in search_results if hit.payload.get("page_id") == top_page]
@@ -124,22 +131,31 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
         messages=messages,
         temperature=0.1
     )
-    ai_reply, used_hits = split_used_docs(completion.choices[0].message.content or "", search_results)
+    # 이름이 일치한 문서/항목이 있으면 그 이미지만 쓴다
+    image_hits = search_results[:named_count] if named_count else search_results
+    return finish_answer(query, completion.choices[0].message.content or "", search_results, image_hits,
+                         search_query, query_vector)
+
+def finish_answer(query: str, raw_reply: str, hits: list, image_hits: list, search_query: str,
+                  query_vector: List[float] = None) -> Dict:
+    """모델 답변에 사용한 문서 링크와 관련 백로그 참고 문구를 붙이고, 도판 후보(image_hits 중 사용한 문서의 것)를 고른다"""
+    ai_reply, used_hits = split_used_docs(raw_reply, hits)
     used_page_ids = list(dict.fromkeys(hit.payload["page_id"] for hit in used_hits if hit.payload.get("page_id")))
 
-    # 이름이 일치한 문서/항목이 있으면 그 이미지만, 그중에서도 답변에 사용한 문서의 이미지만 쓴다
-    image_hits = search_results[:named_count] if named_count else search_results
     used_ids = {hit.id for hit in used_hits}
-    image_hits = [hit for hit in image_hits if hit.id in used_ids]
     images, seen_block_ids = [], set()
     for hit in image_hits:
+        if hit.id not in used_ids:
+            continue
         for img in hit.payload.get("images", []):
             if img.get("block_id") and img["block_id"] not in seen_block_ids:
                 seen_block_ids.add(img["block_id"])
                 images.append(img)
 
-    # 4. 관련 미해결 백로그 참고 문구 (실패해도 답변은 그대로 보낸다)
+    # 관련 미해결 백로그 참고 문구 (실패해도 답변은 그대로 보낸다)
     try:
+        if query_vector is None:
+            query_vector = clients.get_embedding(query)
         notes = backlog.notes_for_answer(query_vector, used_page_ids)
     except Exception as e:
         logger.warning("⚠️ [백로그] 참고 문구 조회 실패, 답변만 보냅니다: %s", e)

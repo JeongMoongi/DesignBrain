@@ -35,7 +35,7 @@ def test_thread_reply_uses_parent_thread_history(monkeypatch):
             return {"messages": thread if ts == "100" else [m for m in thread if m["ts"] == ts]}
 
     received = {}
-    def fake_ask(query, history):
+    def fake_ask(query, history, on_progress=None):
         received.update(query=query, history=history)
         return {"status": "success", "AI_답변": "답변", "page_ids": [], "images": []}
     monkeypatch.setattr(ai_engine, "ask_ai_with_history", fake_ask)
@@ -74,7 +74,7 @@ class AnswerSlack:
 
 @pytest.fixture
 def answer_with_images(monkeypatch):
-    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h: {
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h, on_progress=None: {
         "status": "success", "AI_답변": "**답변**", "page_ids": ["P1"],
         "images": [{"block_id": "b1", "caption": "도판"}, {"block_id": "b2", "caption": "도판"}, {"block_id": "b3", "caption": "도판"}]})
     monkeypatch.setattr(config, "NOTION_INTEGRATION_TOKEN", "tok")
@@ -136,7 +136,7 @@ class HistorySlack:
 
 def ask_recorder(monkeypatch):
     received = {}
-    def fake_ask(query, history):
+    def fake_ask(query, history, on_progress=None):
         received.update(query=query, history=history)
         return {"status": "success", "AI_답변": "답변", "page_ids": [], "images": []}
     monkeypatch.setattr(ai_engine, "ask_ai_with_history", fake_ask)

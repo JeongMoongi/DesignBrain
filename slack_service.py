@@ -73,7 +73,8 @@ PLACEHOLDER_EMOJIS = (
 LEGACY_PLACEHOLDER = "기획서를 읽고 분석 중입니다"
 
 def is_placeholder(text):
-    return text in PLACEHOLDER_EMOJIS or LEGACY_PLACEHOLDER in text
+    # 에이전트 진행 표시가 붙은 '분석 중' 메세지(':brain: 🔍 ... 검색 중…')도 포함한다
+    return text.split(" ", 1)[0] in PLACEHOLDER_EMOJIS or LEGACY_PLACEHOLDER in text
 
 _user_names = {}
 
@@ -191,11 +192,16 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
         return
 
     # '분석 중' 메세지를 답변(또는 실패 안내)으로 바꿔, 스레드에 답변당 메세지 하나만 남긴다
-    placeholder = say(text=random.choice(PLACEHOLDER_EMOJIS), thread_ts=thread_ts)
+    placeholder_emoji = random.choice(PLACEHOLDER_EMOJIS)
+    placeholder = say(text=placeholder_emoji, thread_ts=thread_ts)
     placeholder_ts = sent["placeholder_ts"] = placeholder["ts"]
     sent["question"] = final_query
 
-    res = ai_engine.ask_ai_with_history(final_query, chat_history)
+    # 에이전트가 자료를 찾는 동안 '분석 중' 메세지에 지금 무엇을 보고 있는지 보여준다
+    def show_progress(status):
+        client.chat_update(channel=channel_id, ts=placeholder_ts, text=f"{placeholder_emoji} {status}")
+
+    res = ai_engine.ask_ai_with_history(final_query, chat_history, on_progress=show_progress)
 
     if res.get("status") == "error":
         sent.update(status="error", error_stage=res["stage"], error_reason=res["reason"])

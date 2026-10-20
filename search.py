@@ -69,7 +69,7 @@ def name_aliases(name: str) -> set:
     parts = [name, last] + re.split(r"[()（）‘’“”'\"]", last)
     return {alias for alias in map(normalize_name, parts) if len(alias) >= 2}
 
-# (만들 때 쓴 Qdrant 클라이언트, 별칭 목록). 연결이 바뀌면 (테스트의 임시 DB 등) 다른 DB이므로 다시 만든다
+# (만들 때 쓴 Qdrant 클라이언트, 별칭 목록, 문서 목록). 연결이 바뀌면 (테스트의 임시 DB 등) 다른 DB이므로 다시 만든다
 _name_catalog = None
 _name_catalog_lock = threading.Lock()
 
@@ -78,25 +78,33 @@ def invalidate_name_catalog():
     with _name_catalog_lock:
         _name_catalog = None
 
-def _get_name_catalog() -> Dict[str, set]:
-    """별칭 → {(page_id, item)}. item이 빈 문자열이면 문서 전체. 동기화/삭제 후 다음 질문에서 다시 만든다."""
+def _get_catalogs() -> tuple:
+    """(별칭 → {(page_id, item)}, 제목 → {"page_ids", "items"}). item이 빈 문자열이면 문서 전체.
+    제목이 같은 서로 다른 페이지('아이템' DB 문서와 아이콘 경로만 있는 '아이템' 페이지 등)는 한 문서로 묶는다.
+    동기화/삭제 후 다음 질문에서 다시 만든다."""
     global _name_catalog
     with _name_catalog_lock:
         qdrant = clients.get_qdrant()
         if _name_catalog is not None and _name_catalog[0] is qdrant:
-            return _name_catalog[1]
+            return _name_catalog[1], _name_catalog[2]
         targets = set()
+        documents = {}
         offset = None
         while True:
             points, offset = qdrant.scroll(collection_name=config.COLLECTION_NAME, limit=256, offset=offset,
-                                                 with_payload=["page_id", "title", "item"], with_vectors=False)
+                                                 with_payload=["page_id", "title", "item", "chunk_idx"], with_vectors=False)
             for p in points:
                 page_id = p.payload.get("page_id")
                 if not page_id:
                     continue
-                targets.add((page_id, "", p.payload.get("title", "")))
+                title = p.payload.get("title", "")
+                targets.add((page_id, "", title))
+                doc = documents.setdefault(title, {"page_ids": [], "items": {}})
+                if page_id not in doc["page_ids"]:
+                    doc["page_ids"].append(page_id)
                 if p.payload.get("item"):
                     targets.add((page_id, p.payload["item"], p.payload["item"]))
+                    doc["items"].setdefault(p.payload["item"], p.payload.get("chunk_idx", 0))
             if offset is None:
                 break
         catalog = {}
@@ -104,9 +112,19 @@ def _get_name_catalog() -> Dict[str, set]:
             for alias in name_aliases(name):
                 catalog.setdefault(alias, set()).add((page_id, item))
         catalog = {alias: t for alias, t in catalog.items() if len(t) <= MAX_TARGETS_PER_ALIAS}
-        _name_catalog = (qdrant, catalog)
-        logger.info("📇 [이름 목록] 별칭 %d개 준비", len(catalog))
-        return catalog
+        # 항목은 문서 안의 순서대로
+        for doc in documents.values():
+            doc["items"] = sorted(doc["items"], key=doc["items"].get)
+        _name_catalog = (qdrant, catalog, documents)
+        logger.info("📇 [이름 목록] 별칭 %d개, 문서 %d개 준비", len(catalog), len(documents))
+        return catalog, documents
+
+def _get_name_catalog() -> Dict[str, set]:
+    return _get_catalogs()[0]
+
+def get_documents() -> Dict[str, dict]:
+    """인덱스된 문서 목록: 제목 → {"page_ids", "items"(DB 항목 이름, 문서 안 순서)}"""
+    return _get_catalogs()[1]
 
 def match_names(query: str, catalog: Dict[str, set]) -> List[tuple]:
     """질문에 들어 있는 이름의 대상 목록. 더 긴 이름에 포함된 짧은 이름('변종 분쇄자' 안의 '분쇄자')은 뺀다."""

@@ -86,7 +86,7 @@ class ReplySlack:
 
 
 def run(monkeypatch, answer, raw_text="패턴은?"):
-    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h: answer)
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h, on_progress=None: answer)
     monkeypatch.setattr(slack_service, "_user_names", {})
     slack_service.process_chat_and_reply(ReplySlack(), lambda text, thread_ts=None: {"ts": "4"}, "D1", "1", "3",
                                          raw_text, "U1")
@@ -109,7 +109,7 @@ def test_failed_question_is_logged(monkeypatch):
 
 
 def test_unexpected_error_is_logged(monkeypatch):
-    def boom(q, h):
+    def boom(q, h, on_progress=None):
         raise ValueError("boom")
     monkeypatch.setattr(ai_engine, "ask_ai_with_history", boom)
     slack_service.process_chat_and_reply(ReplySlack(), lambda text, thread_ts=None: {"ts": "4"}, "C1", "3", "3", "질문", "U1")
@@ -121,7 +121,7 @@ def test_logging_failure_does_not_block_the_answer(monkeypatch):
     def broken(entry):
         raise RuntimeError("qdrant down")
     monkeypatch.setattr(qa_log, "record", broken)
-    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h: {"status": "success", "AI_답변": "답변",
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h, on_progress=None: {"status": "success", "AI_답변": "답변",
                                                                          "page_ids": [], "images": []})
     slack = ReplySlack()
     slack_service.process_chat_and_reply(slack, lambda text, thread_ts=None: {"ts": "4"}, "D1", "1", "3", "질문", "U1")

@@ -1,0 +1,247 @@
+"""에이전트 방식 답변: 모델이 도구(검색 / 문서 목록 / 문서 읽기)로 기획서를 직접 찾아가며 질문의 의도에 답한다.
+OpenAI Responses API의 함수 호출을 쓴다 (GPT-6 계열은 Chat Completions에서 추론과 도구 호출을 함께 쓸 수 없다)."""
+import json
+import logging
+from typing import Callable, Dict, List
+from qdrant_client.models import Filter, FieldCondition, MatchAny, MatchValue
+import ai_engine
+import clients
+import config
+import notion_parser
+import search
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = (
+    "너는 게임 기획팀과 함께 일하는 AI 동료 '@Brain'이다. 슬랙에서 기획자의 질문에 답한다.\n"
+    "노션 기획서는 네 사고의 기반이 되는 핵심 자료다. 질문에 맞는 문서를 골라 보여주는 데서 그치지 말고, "
+    "질문한 사람이 진짜 알고 싶은 것이 무엇인지 파악해서 거기에 답하라.\n\n"
+    "[일하는 방식]\n"
+    "1. 질문의 의도를 먼저 파악하라. 사실 확인인지, 여러 문서에 흩어진 정보를 모아야 하는지, 설계에 대한 고민 상담인지 구분하라.\n"
+    "2. 도구로 필요한 자료를 충분히 찾아라. 한 번 검색해서 부족하면 다른 표현으로 다시 검색하고, "
+    "관련 문서는 read_document로 통째로 읽어 맥락을 확인하라. 무슨 문서가 있는지 모르겠으면 list_docs를 써라.\n"
+    "3. 자료 안의 참조를 따라가라. 찾은 항목의 속성에 다른 데이터의 이름이 들어 있으면(예: 아이템의 각인 A='협공') "
+    "사용자는 그것도 그 항목의 일부로 받아들인다. 이름만 전하지 말고 반드시 그 항목을 검색해 내용을 확인한 뒤 함께 설명하라.\n"
+    "4. '챕터 1의 적'처럼 한 문서에 정리돼 있지 않은 질문은 일반몹/미니보스/보스 등 범주별로 각각 찾아 모아라.\n"
+    "5. 이미 대화 기록이나 앞선 도구 결과로 충분하면 더 찾지 말고 답하라.\n\n"
+    "[답변 원칙]\n"
+    "- 결론부터 말하고, 근거가 되는 기획서 내용을 이어서 설명하라. 항목명과 수치는 원문 그대로 인용하라.\n"
+    "- 리더/파트너, 일반몹/미니보스/보스처럼 비슷하지만 다른 대상을 섞지 마라. 확인되지 않으면 추측하지 마라.\n"
+    "- 찾아봤지만 기획서에 없는 정보는 없다고 분명히 말하라. 가까운 정보가 있으면 '참고로 ~는 있어요'처럼 구분해서 덧붙여라.\n"
+    "- 문서끼리 내용이 어긋나거나 기획이 비어 있는 부분을 발견하면 짚어 줘라.\n"
+    "- 설계 상담이나 판단이 필요한 질문에는 기획서를 근거로 네 의견과 제안도 적극적으로 내라. "
+    "단, 기획서에 적힌 사실과 네 해석·의견은 '💡 제안:'처럼 구분해서 써라.\n"
+    "- 너는 기획서를 읽고 답할 뿐, 게임 데이터나 노션 문서를 직접 바꿀 수는 없다. 그런 요청에는 할 수 없다고 말하고, "
+    "관련 기획 정보를 안내하거나 무엇이 필요한지 되물어라. 기획과 무관한 일반 지식 설명으로 새지 마라.\n"
+    "- 슬랙 메세지이므로 핵심 위주로 간결하게 써라. 긴 목록은 묶어서 정리하라.\n"
+    f"- 자료의 '{notion_parser.LINK_REFERENCE_PREFIX}' 줄은 다른 문서를 가리키는 링크일 뿐 그 문서의 내용이 아니다. "
+    "질문과 관련 있을 때만 짧게 언급하고, 링크 너머의 내용을 추측하지 마라.\n"
+    f"- 답변의 맨 마지막 줄에는 '{ai_engine.USED_DOCS_LABEL} 제목1 | 제목2' 형식으로, 답변에 실제로 사용한 문서의 제목만 적어라. "
+    f"사용한 문서가 없으면 '{ai_engine.USED_DOCS_LABEL} 없음'이라고 적어라."
+)
+
+TOOLS = [
+    {"type": "function", "name": "search_docs",
+     "description": "기획서 전체에서 질문과 관련된 부분(청크)을 찾는다. 문서 제목이나 DB 항목 이름(몹, 아이템, 각인 등)이 "
+                    "검색어에 그대로 들어 있으면 그 항목을 우선 찾는다. 결과가 부족하면 다른 표현으로 다시 검색하라.",
+     "parameters": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "검색할 내용. 대화 맥락 없이도 이해되는 완전한 문장이나 키워드"}},
+         "required": ["query"]}},
+    {"type": "function", "name": "list_docs",
+     "description": "인덱스된 기획서 제목과 각 문서의 DB 항목 이름 목록을 본다. 어떤 문서가 있는지 모르거나, "
+                    "범주별로 문서를 찾아야 할 때(예: 챕터별 몹/보스 문서) 쓴다.",
+     "parameters": {"type": "object", "properties": {
+         "keyword": {"type": "string", "description": "제목이나 항목 이름에 들어 있어야 할 단어. 비우면 전체 목록"}}}},
+    {"type": "function", "name": "read_document",
+     "description": "기획서 한 문서를 처음부터 순서대로 읽는다. item을 주면 그 문서의 DB 항목 하나만 읽는다. "
+                    "길면 여러 부분으로 나뉘며 part로 다음 부분을 읽는다.",
+     "parameters": {"type": "object", "properties": {
+         "title": {"type": "string", "description": "문서 제목 (list_docs나 검색 결과에 나온 제목)"},
+         "item": {"type": "string", "description": "읽을 DB 항목 이름 (선택)"},
+         "part": {"type": "integer", "description": "읽을 부분 번호, 1부터 (선택)"}},
+         "required": ["title"]}},
+]
+
+# 도구 결과가 모델 입력을 지나치게 키우지 않도록 자르는 기준
+SEARCH_RESULT_CHARS = 1000
+READ_PART_CHARS = 12000
+LIST_ITEMS_SHOWN = 30
+
+
+class AgentState:
+    """한 질문 동안 도구로 읽은 청크(사용한 문서/도판 선택용)와 도구 호출 기록"""
+    def __init__(self, on_progress):
+        self.hits = {}
+        self.calls = []
+        self.query_vector = None
+        self.on_progress = on_progress
+
+    def add_hits(self, points):
+        for p in points:
+            self.hits.setdefault(p.id, p)
+
+    def progress(self, text):
+        if not self.on_progress:
+            return
+        try:
+            self.on_progress(text)
+        except Exception as e:
+            # 진행 표시는 부가 기능이므로 실패해도 답변을 계속 만든다
+            logger.warning("⚠️ [진행 표시] 실패: %s", e)
+
+
+def chunk_body(payload) -> str:
+    """청크 앞의 '문서: 제목' 머리줄은 도구 결과에 제목을 따로 붙이므로 뗀다"""
+    text = payload.get("text", "")
+    header = f"문서: {payload.get('title', '')}\n"
+    return text[len(header):] if text.startswith(header) else text
+
+
+def tool_search_docs(state: AgentState, query: str) -> str:
+    state.progress(f"🔍 '{query}' 검색 중…")
+    vector = clients.get_embedding(query)
+    if state.query_vector is None:
+        state.query_vector = vector
+    results, _ = search.search_chunks(query, vector)
+    state.add_hits(results)
+    if not results:
+        return "검색 결과 없음"
+    lines = []
+    for hit in results:
+        p = hit.payload
+        where = p.get("title", "무제") + (f" > {p['item']}" if p.get("item") else "")
+        lines.append(f"[{where}]\n{chunk_body(p)[:SEARCH_RESULT_CHARS]}")
+    return "\n\n".join(lines)
+
+
+def tool_list_docs(state: AgentState, keyword: str = "") -> str:
+    state.progress("🗂️ 기획서 목록 확인 중…")
+    documents = search.get_documents()
+    key = search.normalize_name(keyword or "")
+    lines = []
+    for title in sorted(documents):
+        items = documents[title]["items"]
+        if key and key not in search.normalize_name(title):
+            items = [i for i in items if key in search.normalize_name(i)]
+            if not items:
+                continue
+        line = f"- {title}"
+        if items:
+            shown = ", ".join(items[:LIST_ITEMS_SHOWN])
+            more = f" 외 {len(items) - LIST_ITEMS_SHOWN}개" if len(items) > LIST_ITEMS_SHOWN else ""
+            line += f" (항목: {shown}{more})"
+        lines.append(line)
+    return "\n".join(lines) or f"'{keyword}'에 해당하는 문서 없음"
+
+
+def find_title(title: str, documents: Dict[str, dict]):
+    """정확한 제목 → 공백/대소문자 무시 → 부분 일치 순으로 문서를 찾는다"""
+    if title in documents:
+        return title
+    key = search.normalize_name(title)
+    normalized = {search.normalize_name(t): t for t in documents}
+    if key in normalized:
+        return normalized[key]
+    partial = [t for n, t in normalized.items() if key and (key in n or n in key)]
+    return partial[0] if len(partial) == 1 else None
+
+
+def tool_read_document(state: AgentState, title: str, item: str = "", part: int = 1) -> str:
+    documents = search.get_documents()
+    found = find_title(title, documents)
+    if not found:
+        return f"'{title}' 문서를 찾을 수 없음. list_docs로 정확한 제목을 확인하라."
+    state.progress(f"📖 '{found}' 읽는 중…")
+    page_ids = documents[found]["page_ids"]
+    conditions = [FieldCondition(key="page_id", match=MatchAny(any=page_ids))]
+    if item:
+        items = documents[found]["items"]
+        matched = item if item in items else next((i for i in items if search.normalize_name(item) in search.normalize_name(i)), None)
+        if not matched:
+            return f"'{found}' 문서에 '{item}' 항목이 없음. 항목 목록: {', '.join(items[:LIST_ITEMS_SHOWN])}"
+        conditions.append(FieldCondition(key="item", match=MatchValue(value=matched)))
+    points, offset = [], None
+    while True:
+        batch, offset = clients.get_qdrant().scroll(collection_name=config.COLLECTION_NAME, scroll_filter=Filter(must=conditions),
+                                                    limit=256, offset=offset, with_payload=True, with_vectors=False)
+        points += batch
+        if offset is None:
+            break
+    points.sort(key=lambda p: (page_ids.index(p.payload["page_id"]), p.payload.get("chunk_idx", 0)))
+
+    # 청크 경계를 넘지 않게 부분을 나눈다
+    parts, current, size = [], [], 0
+    for p in points:
+        body = chunk_body(p.payload)
+        if current and size + len(body) > READ_PART_CHARS:
+            parts.append(current)
+            current, size = [], 0
+        current.append(p)
+        size += len(body)
+    if current:
+        parts.append(current)
+    if not parts:
+        return f"'{found}' 문서에 내용이 없음"
+    part = min(max(part or 1, 1), len(parts))
+    state.add_hits(parts[part - 1])
+    text = "\n".join(chunk_body(p.payload) for p in parts[part - 1])
+    header = f"[문서: {found}" + (f" > {item}" if item else "") + (f" | {part}/{len(parts)}부분]" if len(parts) > 1 else "]")
+    return f"{header}\n{text}"
+
+
+TOOL_FUNCTIONS = {"search_docs": tool_search_docs, "list_docs": tool_list_docs, "read_document": tool_read_document}
+
+
+def run_tool(state: AgentState, name: str, arguments: str) -> str:
+    try:
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return "도구 인자를 해석할 수 없음 (JSON 형식 오류)"
+    func = TOOL_FUNCTIONS.get(name)
+    if not func:
+        return f"알 수 없는 도구: {name}"
+    state.calls.append(f"{name}({', '.join(str(v) for v in args.values())})")
+    logger.info("🛠️ [에이전트 도구] %s %s", name, args)
+    try:
+        return func(state, **args)
+    except TypeError as e:
+        return f"도구 인자가 잘못됨: {e}"
+
+
+def ask_agent(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, str],
+              on_progress: Callable[[str], None] = None) -> Dict:
+    state = AgentState(on_progress)
+    progress["stage"] = "자료 탐색"
+    openai_client = clients.get_openai()
+    options = {"model": config.AGENT_MODEL, "instructions": SYSTEM_PROMPT, "tools": TOOLS,
+               "reasoning": {"effort": config.AGENT_REASONING_EFFORT}}
+    history = [{"role": h.get("role", "user"), "content": h.get("content", "")}
+               for h in chat_history[-ai_engine.ANSWER_HISTORY_TURNS:]]
+    response = openai_client.responses.create(input=history + [{"role": "user", "content": query}], **options)
+    usage = [response.usage]
+
+    for round_no in range(1, config.AGENT_MAX_TOOL_ROUNDS + 1):
+        calls = [item for item in response.output if item.type == "function_call"]
+        if not calls:
+            break
+        outputs = [{"type": "function_call_output", "call_id": c.call_id, "output": run_tool(state, c.name, c.arguments)}
+                   for c in calls]
+        # 마지막 차례에는 도구를 더 쓰지 못하게 해 모은 자료로 답하게 한다
+        final_round = round_no == config.AGENT_MAX_TOOL_ROUNDS
+        response = openai_client.responses.create(previous_response_id=response.id, input=outputs,
+                                                  **options, **({"tool_choice": "none"} if final_round else {}))
+        usage.append(response.usage)
+
+    input_tokens = sum(u.input_tokens for u in usage if u)
+    output_tokens = sum(u.output_tokens for u in usage if u)
+    logger.info("🤖 [에이전트] 호출 %d회, 도구 %d회, 토큰 입력 %d / 출력 %d", len(usage), len(state.calls), input_tokens, output_tokens)
+
+    progress["stage"] = "답변 정리"
+    reply = response.output_text or ""
+    hits = list(state.hits.values())
+    # DB 항목 청크는 답변에 그 항목 이름이 나올 때만 도판 후보로 쓴다 (문서 전체를 읽으면 다른 항목 도판까지 섞이므로)
+    normalized_reply = search.normalize_name(reply)
+    image_hits = [h for h in hits if not h.payload.get("item") or search.normalize_name(h.payload["item"]) in normalized_reply]
+    result = ai_engine.finish_answer(query, reply, hits, image_hits, " | ".join(state.calls), state.query_vector)
+    result["usage"] = {"input_tokens": input_tokens, "output_tokens": output_tokens, "tool_calls": len(state.calls)}
+    return result
