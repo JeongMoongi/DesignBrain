@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 OPEN, RESOLVED = "open", "resolved"
-# 사서 제안의 상태 (RESOLVED는 승인되어 노션에 반영됨)
+# 사서 제안의 상태 (RESOLVED는 승인되어 노션에 반영됨).
+# APPLIED/OBSOLETE는 문서가 갱신됐을 때 사서가 대조해 닫은 것: 문서 수정으로 해결됨 / 가리키던 부분이 바뀌어 무효
 HELD, REJECTED = "held", "rejected"
+APPLIED, OBSOLETE = "applied", "obsolete"
 PROPOSAL = "proposal"
 # 제안 종류: 원본 문서의 결정 기록에 덧붙일 결정 / 새로 만들 문서
 DECISION, WRITING = "decision", "writing"
@@ -150,13 +152,21 @@ def notes_for_answer(query_vector: List[float], answer_page_ids: List[str]) -> L
         query_filter=Filter(must=[FieldCondition(key="status", match=MatchValue(value=OPEN))]),
     ).points
     answer_pages = set(answer_page_ids)
-    notes = []
+    notes, shown = [], []
     for hit in hits:
         linked = bool(answer_pages & set(hit.payload.get("page_ids", [])))
         if hit.score >= (LINKED_MIN_SCORE if linked else UNLINKED_MIN_SCORE):
             notes.append(hit.payload["note"])
+            shown.append(hit.id)
         if len(notes) >= MAX_NOTES_PER_ANSWER:
             break
+    # 팀원 질문에 나온 백로그는 리마인더에서 먼저 묻는다 (기록 실패는 답변에 영향을 주지 않는다)
+    if shown:
+        try:
+            clients.get_qdrant().set_payload(collection_name=config.BACKLOG_COLLECTION, points=shown,
+                                             payload={"last_answer_at": datetime.now(KST).isoformat()})
+        except Exception as e:
+            logger.warning("⚠️ [백로그] 답변 표시 기록 실패: %s", e)
     return notes
 
 
@@ -247,6 +257,48 @@ def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, 
     clients.get_qdrant().upsert(collection_name=config.BACKLOG_COLLECTION,
                                 points=[PointStruct(id=backlog_id, vector=vector, payload=record)])
     return record
+
+
+# 사서 제안은 쌓인 것 중 이 비율만(최소/최대 개수 안에서) 매일 묻는다. 사람이 등록한 백로그는 모두 묻는다
+REMINDER_PROPOSAL_RATIO = 0.1
+REMINDER_PROPOSAL_MIN = 1
+REMINDER_PROPOSAL_MAX = 5
+# 이 기간 안에 답변 참고 문구로 나온 제안(팀원들이 실제로 궁금해한 부분)을 먼저 묻는다
+RECENT_ANSWER_DAYS = 7
+
+
+def reminder_selection(records: List[Dict], now: Optional[datetime] = None) -> tuple:
+    """담당자 한 명의 미해결 백로그에서 오늘 물을 것을 고른다. (고른 것, 사서 제안 전체 수)
+    사서 제안 순서: 최근 답변에 나온 것 → 가장 오래 묻지 않은 것 → 오래된 것 (돌아가며 모두 묻게 된다)"""
+    now = now or datetime.now(KST)
+    people = [r for r in records if r.get("kind") != PROPOSAL]
+    proposals = [r for r in records if r.get("kind") == PROPOSAL]
+    if not proposals:
+        return people, 0
+    count = min(REMINDER_PROPOSAL_MAX, max(REMINDER_PROPOSAL_MIN, int(len(proposals) * REMINDER_PROPOSAL_RATIO)))
+    recent = (now - timedelta(days=RECENT_ANSWER_DAYS)).isoformat()
+    proposals.sort(key=lambda r: (not (r.get("last_answer_at", "") >= recent), r.get("last_reminded_at", ""), r["created_at"]))
+    return people + proposals[:count], len(proposals)
+
+
+def mark_reminded(records: List[Dict]) -> None:
+    ids = [r["backlog_id"] for r in records if r.get("kind") == PROPOSAL]
+    if ids:
+        clients.get_qdrant().set_payload(collection_name=config.BACKLOG_COLLECTION, points=ids,
+                                         payload={"last_reminded_at": datetime.now(KST).isoformat()})
+
+
+def open_for_page(page_id: str) -> List[Dict]:
+    """이 문서에 연결된 미해결 백로그 (사람이 등록한 것과 사서 제안 모두)"""
+    points, offset, records = [], None, []
+    while True:
+        points, offset = clients.get_qdrant().scroll(
+            collection_name=config.BACKLOG_COLLECTION, limit=256, offset=offset, with_payload=True,
+            scroll_filter=Filter(must=[FieldCondition(key="page_ids", match=MatchValue(value=page_id)),
+                                       FieldCondition(key="status", match=MatchValue(value=OPEN))]))
+        records += [p.payload for p in points]
+        if offset is None:
+            return records
 
 
 def update(backlog_id: str, **fields) -> None:

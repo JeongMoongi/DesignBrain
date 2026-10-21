@@ -3,6 +3,7 @@
 다른 문서는 정리본을 해석자와 같은 도구(agent.py의 검색/목록/문서 읽기)로 찾아 읽는다."""
 import json
 import logging
+from datetime import datetime
 from typing import Dict, List
 import agent
 import backlog
@@ -41,7 +42,20 @@ REVIEW_PROMPT = (
     '"assumptions": "...", "related_docs": ["..."], "new_doc_title": "..."}]}'
 )
 REVIEW_MAX_TOOL_ROUNDS = 8
-STATUS_LABELS = {backlog.OPEN: "처리 대기", backlog.RESOLVED: "승인됨", backlog.HELD: "보류됨", backlog.REJECTED: "반려됨"}
+STATUS_LABELS = {backlog.OPEN: "처리 대기", backlog.RESOLVED: "승인됨", backlog.HELD: "보류됨", backlog.REJECTED: "반려됨",
+                 backlog.APPLIED: "문서 수정으로 반영됨", backlog.OBSOLETE: "문서 변경으로 무효"}
+
+RECHECK_PROMPT = (
+    "너는 게임 기획팀의 기획서 정리 담당 '사서'다. [갱신된 문서]가 방금 바뀌었다. 이 문서에 대해 기획자 처리를 기다리던 [제안]들이 "
+    "갱신된 문서에서 어떻게 됐는지 판단하라.\n"
+    "- applied: 문서 수정으로 제안이 다룬 문제가 해결됐다 (제안과 다른 내용으로 정했어도 해결됐으면 applied)\n"
+    "- obsolete: 제안이 가리키던 부분이 사라지거나 크게 바뀌어 제안이 더 이상 의미 없다\n"
+    "- keep: 아직 그대로다. 확실하지 않으면 keep\n"
+    "JSON만 출력한다: {\"results\": [{\"no\": 제안 번호, \"status\": \"applied|obsolete|keep\", \"reason\": \"근거 한 문장\"}]}"
+)
+RECHECK_STATUS = {"applied": backlog.APPLIED, "obsolete": backlog.OBSOLETE}
+RECHECK_LABELS = {backlog.APPLIED: "✅ 문서가 수정돼 반영된 것으로 보고 닫았어요", backlog.OBSOLETE: "🗑️ 문서가 바뀌어 더 이상 필요 없는 제안이라 닫았어요"}
+RECHECK_PROPOSAL_CHARS = 600
 
 
 def refined_text(page_id: str) -> str:
@@ -126,3 +140,45 @@ def related_docs(names: List[str]) -> List[Dict[str, str]]:
         if found:
             docs += backlog.linked_docs(documents[found]["page_ids"][:1])
     return list({d["page_id"]: d for d in docs}.values())
+
+
+def recheck_open(page_id: str) -> List[Dict]:
+    """문서가 갱신되면 그 문서의 미해결 백로그를 새 버전과 대조한다.
+    사서 제안은 반영됐거나 무효가 된 것을 닫고 원래 메세지에 알린다. 사람이 등록한 백로그는 닫지 않고 갱신됐다는 표시만 남긴다.
+    닫은 제안을 돌려준다."""
+    import proposal_slack
+    records = backlog.open_for_page(page_id)
+    now = datetime.now(backlog.KST).isoformat()
+    for r in records:
+        if r.get("kind") != backlog.PROPOSAL:
+            backlog.update(r["backlog_id"], doc_updated_at=now)
+    proposals = [r for r in records if r.get("kind") == backlog.PROPOSAL]
+    text = refined_text(page_id)
+    if not proposals or not text:
+        return []
+    listing = "\n\n".join(f"{no}. {r['content']}\n문제: {r.get('problem', '')}\n제안: {r['proposal'][:RECHECK_PROPOSAL_CHARS]}"
+                          for no, r in enumerate(proposals, 1))
+    response = clients.get_openai().responses.create(
+        model=config.REFINE_MODEL, instructions=RECHECK_PROMPT, reasoning={"effort": config.REFINE_REASONING_EFFORT},
+        input=f"[갱신된 문서]\n{text}\n\n[제안]\n{listing}")
+    closed = []
+    for result in parse_json(response.output_text or "").get("results", []):
+        status = RECHECK_STATUS.get(result.get("status"))
+        no = result.get("no")
+        if not status or not isinstance(no, int) or not 1 <= no <= len(proposals):
+            continue
+        record = proposals[no - 1]
+        reason = result.get("reason", "")
+        backlog.close(record["backlog_id"], "사서", status, close_reason=reason)
+        closed.append(record)
+        logger.info("🧹 [사서] 문서 갱신으로 제안 닫음 (%s): %s — %s", status, record["content"], reason)
+        if record.get("slack_ts"):
+            try:
+                client = proposal_slack.web_client()
+                import backlog_slack
+                client.chat_update(channel=record["slack_channel"], ts=record["slack_ts"], text=record["content"],
+                                   blocks=backlog_slack.replace_item_actions(proposal_slack.item_blocks(record), record["backlog_id"],
+                                                                             f"{RECHECK_LABELS[status]} ({reason})"))
+            except Exception as e:
+                logger.warning("⚠️ [사서] 닫은 제안 메세지 갱신 실패: %s", e)
+    return closed

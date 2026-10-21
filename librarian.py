@@ -293,6 +293,7 @@ def review_and_notify(page_id: str, requested_by: str) -> List[Dict]:
 def process_jobs() -> int:
     """쌓인 작업을 오래된 것부터 처리하고 처리한 수를 돌려준다.
     '완료'로 들어온 작업(requested_by)은 정리 후 검토까지 하고, 종합 요청은 초안을 만들어 보낸다."""
+    import review
     import synthesis
     jobs = pending_jobs()
     for job in jobs:
@@ -300,8 +301,9 @@ def process_jobs() -> int:
             if job.get("kind") == SYNTHESIS:
                 synthesis.handle_request(job)
             else:
-                # 원본 내용이 바뀌었으면 그 원본으로 만든 지도 문서에 반영할 것이 있는지 본다
+                # 원본 내용이 바뀌었으면: 기다리던 제안이 반영됐는지 대조하고, 그 원본으로 만든 지도에 반영할 것이 있는지 본다
                 if refine_document(job["page_id"]):
+                    review.recheck_open(job["page_id"])
                     synthesis.check_dependents(job["page_id"])
                 if job.get("requested_by"):
                     review_and_notify(job["page_id"], job["requested_by"])

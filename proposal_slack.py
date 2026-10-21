@@ -124,7 +124,9 @@ def send_review(client, assignee_id: Optional[str], target: Dict, records: List[
         lines.append("(받으실 분을 슬랙에서 찾지 못해 대신 보내요)")
     head = client.chat_postMessage(channel=channel, text="\n\n".join(lines))
     for record in records:
-        client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
+        sent = client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
+        # 문서가 갱신돼 사서가 제안을 닫을 때 이 메세지의 버튼을 결과 문구로 바꾼다
+        backlog.update(record["backlog_id"], slack_channel=sent["channel"], slack_ts=sent["ts"])
     logger.info("📬 [사서] '%s' 제안 %d건을 %s 에게 보냈습니다.", target["title"], len(records), channel)
 
 

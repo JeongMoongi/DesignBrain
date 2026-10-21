@@ -348,3 +348,86 @@ def test_chat_on_closed_proposal_says_so(store):
     backlog.close(record["backlog_id"], "U1", backlog.HELD)
     assert proposal_slack.handle_chat_message(slack, chat_event("고쳐 줘", "1.0")) is True
     assert slack.posts[-1]["text"] == "이미 처리된 제안이에요."
+
+
+# --- 리마인더: 사서 제안은 쌓인 것의 10%만 ---
+def fake_record(no, kind=backlog.PROPOSAL, **fields):
+    return {"backlog_id": f"b{no}", "kind": kind, "created_at": f"2026-10-{no:02d}", **fields}
+
+
+@pytest.mark.parametrize("total, expected", [(1, 1), (9, 1), (25, 2), (80, 5)])
+def test_reminder_asks_ten_percent_of_proposals_within_bounds(total, expected):
+    people = [fake_record(99, kind=None)]
+    chosen, proposal_total = backlog.reminder_selection(people + [fake_record(i) for i in range(1, total + 1)])
+    assert proposal_total == total
+    assert chosen[0]["backlog_id"] == "b99" and len(chosen) == 1 + expected
+
+
+def test_reminder_prefers_recently_asked_about_then_rotates():
+    from datetime import datetime
+    now = datetime(2026, 10, 21, tzinfo=backlog.KST)
+    records = [fake_record(1, last_reminded_at="2026-10-20"), fake_record(2), fake_record(3, last_reminded_at="2026-10-19"),
+               fake_record(4, last_answer_at="2026-10-20T10:00:00+09:00", last_reminded_at="2026-10-20")] + \
+              [fake_record(i, last_reminded_at="2026-10-20") for i in range(5, 21)]
+    chosen, _ = backlog.reminder_selection(records, now=now)
+    # 20건의 10% = 2건: 최근 답변에 나온 b4, 그다음 한 번도 묻지 않은 b2
+    assert [r["backlog_id"] for r in chosen] == ["b4", "b2"]
+
+
+def test_reminder_header_counts_people_and_proposals():
+    records = [fake_record(1, kind=None), fake_record(2)]
+    header = backlog_slack.reminder_header(records, proposal_total=12)
+    assert "백로그가 *1건*" in header and "사서 제안 *12건* 중 오늘은 *1건*" in header
+
+
+def test_send_reminders_marks_asked_proposals(store):
+    for _ in range(3):
+        add()
+    slack = FakeSlack()
+    backlog_slack.send_backlog_reminders(slack)
+    reminded = [r for r in backlog.proposals_for_page("P1") if r.get("last_reminded_at")]
+    assert len(reminded) == 1 and len(slack.posts) == 1
+
+
+def test_answer_notes_remember_when_shown(store):
+    record = add()
+    backlog.notes_for_answer(VECTOR, ["P1"])
+    assert backlog.get(record["backlog_id"]).get("last_answer_at")
+
+
+def test_review_messages_remember_where_each_proposal_is(store):
+    record, slack = add(), FakeSlack()
+    proposal_slack.send_review(slack, "U1", TARGET, [record])
+    saved = backlog.get(record["backlog_id"])
+    assert (saved["slack_channel"], saved["slack_ts"]) == ("U1", "2.0")
+
+
+# --- 문서가 갱신되면 미해결 제안 대조 ---
+def test_recheck_closes_applied_proposals_and_flags_people_backlogs(store, monkeypatch):
+    from qdrant_client.models import PointStruct
+    from test_synthesis import install_responses
+    applied, kept = add(), add({**DECISION, "title": "결정이 필요함: 다른 것"})
+    backlog.update(applied["backlog_id"], slack_channel="U1", slack_ts="5.0")
+    person = backlog.add("U2", "팀원", "U1", "담당", "디고리 수치 수정 필요", [TARGET], {})
+    store.upsert(config.REFINED_COLLECTION, [PointStruct(id=1, vector=VECTOR, payload={
+        "page_id": "P1", "chunk_idx": 0, "text": "문서: 디고리\n- 잔불 강타는 파트너 스킬", "title": "디고리"})])
+    slack = FakeSlack()
+    monkeypatch.setattr(proposal_slack, "web_client", lambda: slack)
+    fake = install_responses(monkeypatch, {"results": [{"no": 1, "status": "applied", "reason": "본문에 반영됨"},
+                                                       {"no": 2, "status": "keep", "reason": ""}]})
+    closed = review.recheck_open("P1")
+    assert "[갱신된 문서]\n- 잔불 강타는 파트너 스킬" in fake.requests[0]["input"]
+    assert [r["backlog_id"] for r in closed] == [applied["backlog_id"]]
+    saved = backlog.get(applied["backlog_id"])
+    assert (saved["status"], saved["close_reason"]) == (backlog.APPLIED, "본문에 반영됨")
+    assert backlog.get(kept["backlog_id"])["status"] == backlog.OPEN
+    assert backlog.get(person["backlog_id"]).get("doc_updated_at")
+    assert backlog.get(person["backlog_id"])["status"] == backlog.OPEN
+    update = slack.updates[0]
+    assert update["ts"] == "5.0" and "반영된 것으로 보고 닫았어요 (본문에 반영됨)" in update["blocks"][-1]["elements"][0]["text"]
+
+
+def test_people_backlog_reminder_says_document_was_updated():
+    record = {"backlog_id": "b1", "content": "수치 수정", "created_at": "2026-10-01", "docs": [], "doc_updated_at": "2026-10-21T10:00"}
+    text = backlog_slack.reminder_item_blocks(record)[0]["text"]["text"]
+    assert "📝 관련 기획서가 2026-10-21에 갱신됐어요" in text

@@ -84,6 +84,8 @@ def reminder_item_blocks(record):
     details = [f"등록: {record.get('reporter_name') or '팀원'} · {record['created_at'][:10]}"]
     if record.get("docs"):
         details.append(f"관련 기획서: {doc_links(record['docs'])}")
+    if record.get("doc_updated_at"):
+        details.append(f"📝 관련 기획서가 {record['doc_updated_at'][:10]}에 갱신됐어요. 반영됐다면 [✅ 해결됨]을 눌러 주세요")
     return [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{record['content']}*\n" + "\n".join(f"• {d}" for d in details)}},
         {"type": "actions", "block_id": f"backlog_{record['backlog_id']}", "elements": [
@@ -94,10 +96,19 @@ def reminder_item_blocks(record):
         ]},
     ]
 
-def reminder_messages(records):
-    """담당자 한 명에게 보낼 DM 메세지들 (블록 목록의 목록). 메세지마다 항목 수와 블록 수 제한을 지킨다"""
-    messages = [[{"type": "section", "text": {"type": "mrkdwn", "text":
-        f"📋 아직 해결되지 않은 백로그가 *{len(records)}건* 있어요. 기획서에 반영됐다면 [✅ 해결됨]을 눌러 주세요."}}]]
+def reminder_header(records, proposal_total):
+    people = sum(1 for r in records if r.get("kind") != backlog.PROPOSAL)
+    parts = []
+    if people:
+        parts.append(f"아직 해결되지 않은 백로그가 *{people}건* 있어요. 기획서에 반영됐다면 [✅ 해결됨]을 눌러 주세요.")
+    if proposal_total:
+        parts.append(f"처리를 기다리는 사서 제안 *{proposal_total}건* 중 오늘은 *{len(records) - people}건*만 골랐어요.")
+    return "📋 " + "\n".join(parts)
+
+def reminder_messages(records, proposal_total=0):
+    """담당자 한 명에게 보낼 DM 메세지들 (블록 목록의 목록). 메세지마다 항목 수와 블록 수 제한을 지킨다.
+    proposal_total은 오늘 고르기 전의 사서 제안 수 (머리말에 쓴다)"""
+    messages = [[{"type": "section", "text": {"type": "mrkdwn", "text": reminder_header(records, proposal_total)}}]]
     items_in_message = 0
     for record in records:
         blocks = reminder_item_blocks(record)
@@ -109,11 +120,13 @@ def reminder_messages(records):
     return messages
 
 def send_backlog_reminders(client):
-    for assignee_id, records in backlog.open_by_assignee().items():
+    for assignee_id, all_records in backlog.open_by_assignee().items():
         try:
-            for blocks in reminder_messages(records):
+            records, proposal_total = backlog.reminder_selection(all_records)
+            for blocks in reminder_messages(records, proposal_total):
                 client.chat_postMessage(channel=assignee_id, blocks=blocks, text=f"미해결 백로그 {len(records)}건")
-            logger.info("📬 [백로그] %s 에게 미해결 %d건 안내", assignee_id, len(records))
+            backlog.mark_reminded(records)
+            logger.info("📬 [백로그] %s 에게 미해결 %d건 중 %d건 안내", assignee_id, len(all_records), len(records))
         except Exception as e:
             logger.error("🚨 [백로그] %s 리마인더 DM 실패: %s", assignee_id, e)
 
