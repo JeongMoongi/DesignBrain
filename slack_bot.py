@@ -86,7 +86,7 @@ def init_slack():
         ack()
         backlog_slack.handle_backlog_button(body, client, resolve=False)
 
-    # 6. 수집가 제안 버튼과 입력창 (담당자만 처리 가능)
+    # 6. 사서 제안 버튼과 입력창 (담당자만 처리 가능)
     @slack_app.action("proposal_approve")
     def handle_proposal_approve(ack, body, client):
         ack()

@@ -4,7 +4,7 @@ avoid(틀린 답의 예) 기준으로 채점한다. 답변 전문은 마크다�
     python eval_agent.py                                  # 현재 설정(config.ANSWER_MODE 등)으로
     python eval_agent.py --mode classic                   # 기존 방식 (검색 1회)
     python eval_agent.py --mode agent --model gpt-6.1-sol --effort low
-    python eval_agent.py --mode agent --source refined    # 수집가의 정리본을 읽는 해석자
+    python eval_agent.py --mode agent --source refined    # 사서의 정리본을 읽는 해석자
     python eval_agent.py multi- consult-02                # id가 이 값들로 시작하는 질문만
 
 실제 Qdrant/OpenAI를 사용한다 (채점 포함 질문마다 여러 번 호출).

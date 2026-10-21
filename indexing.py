@@ -6,7 +6,7 @@ import uuid
 from typing import List, Dict
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue, HasIdCondition
 import clients
-import collector
+import librarian
 import doc_diagnosis
 import config
 import notion_parser
@@ -122,7 +122,7 @@ def _page_lock(page_id: str) -> threading.Lock:
 def sync_document_to_db(page_id: str, notion_token: str, notify: bool = False, requested_by: str = None):
     """노션 문서를 파싱해 청크로 나눠 Qdrant에 저장. 휴지통 문서는 저장하지 않고 인덱스에서 제거한다.
     저장한 뒤 문서 진단을 남기고, notify면(웹훅 동기화) 진단할 것이 있을 때 담당자에게 알린다.
-    수집가 작업 목록에도 올려 정리본을 새로 만들게 한다. requested_by('완료'한 사람의 노션 ID)가 있으면 수집가가 검토까지 한다."""
+    사서 작업 목록에도 올려 정리본을 새로 만들게 한다. requested_by('완료'한 사람의 노션 ID)가 있으면 사서가 검토까지 한다."""
     with _page_lock(page_id):
         return _sync_document(page_id, notion_token, notify, requested_by)
 
@@ -197,9 +197,9 @@ def _sync_document(page_id: str, notion_token: str, notify: bool = False, reques
     logger.info("🎉 [동기화 완료] '%s' (%d개 청크 저장)", title, len(points))
     doc_diagnosis.run(doc_data, notify_owner=notify)
     try:
-        collector.enqueue(page_id, requested_by)
+        librarian.enqueue(page_id, requested_by)
     except Exception as e:
-        logger.warning("⚠️ [수집가] 작업 목록에 올리지 못했습니다 (원본은 저장됨, page_id: %s): %s", page_id, e)
+        logger.warning("⚠️ [사서] 작업 목록에 올리지 못했습니다 (원본은 저장됨, page_id: %s): %s", page_id, e)
     return True
 
 
@@ -219,7 +219,7 @@ def _delete_page_points(page_id: str):
     except Exception as e:
         logger.warning("⚠️ [문서 진단] 삭제된 문서의 진단 기록 정리 실패: %s", e)
     try:
-        collector.delete_refined(page_id)
+        librarian.delete_refined(page_id)
     except Exception as e:
-        logger.warning("⚠️ [수집가] 삭제된 문서의 정리본 정리 실패: %s", e)
+        logger.warning("⚠️ [사서] 삭제된 문서의 정리본 정리 실패: %s", e)
     logger.info("🗑️ [삭제 완료] page_id: %s 의 청크를 Qdrant에서 제거했습니다.", page_id)

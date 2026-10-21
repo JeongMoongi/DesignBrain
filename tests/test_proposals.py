@@ -4,7 +4,7 @@ from qdrant_client.models import PointStruct
 import backlog
 import backlog_slack
 import clients
-import collector
+import librarian
 import config
 import indexing
 import notion_writer
@@ -131,15 +131,15 @@ def test_earlier_proposals_show_status_and_reason(store):
     assert review.earlier_proposals("P9") == "(없음)"
 
 
-# --- 수집가 작업: 정리 후 검토 ---
+# --- 사서 작업: 정리 후 검토 ---
 def test_enqueue_keeps_requester_when_resynced_without_one(store):
-    collector.enqueue("P1", "N1")
-    collector.enqueue("P1")
-    assert collector.pending_jobs()[0]["requested_by"] == "N1"
+    librarian.enqueue("P1", "N1")
+    librarian.enqueue("P1")
+    assert librarian.pending_jobs()[0]["requested_by"] == "N1"
 
 
 def test_review_runs_once_per_original_and_sends_proposals(store, monkeypatch):
-    store.upsert(config.REFINED_COLLECTION, [PointStruct(id=collector.refined_point_id("P1", 0), vector=VECTOR, payload={
+    store.upsert(config.REFINED_COLLECTION, [PointStruct(id=librarian.refined_point_id("P1", 0), vector=VECTOR, payload={
         "page_id": "P1", "title": "디고리", "url": "https://notion/P1", "text": "문서: 디고리\n## 개요", "chunk_idx": 0,
         "source_hash": "h1"})])
     reviews, slack = [], FakeSlack()
@@ -148,11 +148,11 @@ def test_review_runs_once_per_original_and_sends_proposals(store, monkeypatch):
     monkeypatch.setattr(proposal_slack, "web_client", lambda: slack)
     monkeypatch.setattr(notion_writer, "user_info", lambda notion_id: {"email": "u7@game.com", "name": "칠번"})
 
-    records = collector.review_and_notify("P1", "N7")
+    records = librarian.review_and_notify("P1", "N7")
     assert [r["assignee_id"] for r in records] == ["U7", "U7"]
     assert [p["channel"] for p in slack.posts] == ["U7", "U7", "U7"]
     assert all(p.get("thread_ts") == "1.0" for p in slack.posts[1:])
-    assert collector.review_and_notify("P1", "N7") == []
+    assert librarian.review_and_notify("P1", "N7") == []
     assert reviews == ["P1"]
 
 
@@ -179,14 +179,14 @@ def test_slack_user_is_found_by_name_when_emails_differ(monkeypatch):
 def test_review_goes_to_report_user_when_requester_is_unknown(store, monkeypatch):
     """대신 받은 사람이 담당자가 되어 버튼을 누를 수 있어야 한다"""
     monkeypatch.setattr(config, "DIAGNOSIS_REPORT_USER_ID", "UADMIN")
-    store.upsert(config.REFINED_COLLECTION, [PointStruct(id=collector.refined_point_id("P1", 0), vector=VECTOR, payload={
+    store.upsert(config.REFINED_COLLECTION, [PointStruct(id=librarian.refined_point_id("P1", 0), vector=VECTOR, payload={
         "page_id": "P1", "title": "디고리", "text": "문서: 디고리\n## 개요", "chunk_idx": 0, "source_hash": "h1"})])
     slack = FakeSlack()
     monkeypatch.setattr(review, "review_document", lambda page_id, title: [DECISION])
     monkeypatch.setattr(review, "related_docs", lambda names: [])
     monkeypatch.setattr(proposal_slack, "web_client", lambda: slack)
     monkeypatch.setattr(notion_writer, "user_info", lambda notion_id: {})
-    records = collector.review_and_notify("P1", "N-unknown")
+    records = librarian.review_and_notify("P1", "N-unknown")
     assert records[0]["assignee_id"] == "UADMIN"
     assert slack.posts[0]["channel"] == "UADMIN"
     assert "찾지 못해" in slack.posts[0]["text"]

@@ -1,12 +1,12 @@
-"""수집가: 저장된 원본 기획서를 해석자(agent.py)가 읽기 쉬운 정리본으로 다시 써서 별도 컬렉션(REFINED_COLLECTION)에 저장한다.
+"""사서: 저장된 원본 기획서를 해석자(agent.py)가 읽기 쉬운 정리본으로 다시 써서 별도 컬렉션(REFINED_COLLECTION)에 저장한다.
 
-원본 동기화(indexing)가 끝나면 문서를 작업 목록(COLLECTOR_JOB_COLLECTION)에 올리고, 별도 프로세스가 하나씩 정리한다.
+원본 동기화(indexing)가 끝나면 문서를 작업 목록(LIBRARIAN_JOB_COLLECTION)에 올리고, 별도 프로세스가 하나씩 정리한다.
 정리에 수십 초가 걸리므로 슬랙 답변 서버와 프로세스를 나눈다. 둘은 DB로만 주고받는다.
 
-    python collector.py                # 작업 목록을 계속 확인하며 정리 (VM의 designbrain-collector 서비스)
-    python collector.py --all          # 인덱스된 모든 문서를 지금 정리 (원본이 바뀌지 않은 문서는 건너뜀, --workers로 동시 처리)
-    python collector.py <page_id>...   # 지정한 문서만 지금 정리
-    python collector.py --dry-run <page_id>   # 저장하지 않고 정리본만 출력
+    python librarian.py                # 작업 목록을 계속 확인하며 정리 (VM의 designbrain-librarian 서비스)
+    python librarian.py --all          # 인덱스된 모든 문서를 지금 정리 (원본이 바뀌지 않은 문서는 건너뜀, --workers로 동시 처리)
+    python librarian.py <page_id>...   # 지정한 문서만 지금 정리
+    python librarian.py --dry-run <page_id>   # 저장하지 않고 정리본만 출력
 
 정리본 청크의 payload는 원본 청크와 같은 모양(page_id, title, path, url, text, item, images)이라 검색/답변 코드를 그대로 쓴다.
 sources에는 정리에 쓴 원본 문서 목록이 들어간다 (출처. 원본이 다시 동기화되면 그 원본으로 만든 정리본을 다시 정리한다).
@@ -29,7 +29,7 @@ import clients
 import config
 import indexing
 
-logger = logging.getLogger("collector")
+logger = logging.getLogger("librarian")
 
 REFINE_PROMPT = (
     "너는 게임 기획팀의 기획서 정리 담당 '사서'다. 노션 원본 기획서를 다른 AI(해석자)가 질문에 답할 때 읽을 정리본으로 다시 써라.\n\n"
@@ -58,7 +58,7 @@ JOB_MAX_ATTEMPTS = 3
 
 # --- [작업 목록] ---
 def job_id(page_id: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"collector-job:{page_id}"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"librarian-job:{page_id}"))
 
 def enqueue(page_id: str, requested_by: str = None) -> None:
     """정리할 문서를 작업 목록에 올린다. 이미 있으면 요청 시각만 새로 바뀐다 (같은 문서는 한 번만 정리).
@@ -66,16 +66,16 @@ def enqueue(page_id: str, requested_by: str = None) -> None:
     기다리는 작업에 이미 요청자가 있으면 요청자 없는 재동기화가 지우지 않는다."""
     qdrant = clients.get_qdrant()
     if not requested_by:
-        waiting = qdrant.retrieve(collection_name=config.COLLECTOR_JOB_COLLECTION, ids=[job_id(page_id)])
+        waiting = qdrant.retrieve(collection_name=config.LIBRARIAN_JOB_COLLECTION, ids=[job_id(page_id)])
         requested_by = waiting[0].payload.get("requested_by") if waiting else None
-    qdrant.upsert(collection_name=config.COLLECTOR_JOB_COLLECTION, points=[
+    qdrant.upsert(collection_name=config.LIBRARIAN_JOB_COLLECTION, points=[
         PointStruct(id=job_id(page_id), vector={}, payload={"page_id": page_id, "requested_at": time.time(), "attempts": 0,
                                                             "requested_by": requested_by})])
 
 def pending_jobs() -> List[Dict]:
     jobs, offset = [], None
     while True:
-        points, offset = clients.get_qdrant().scroll(collection_name=config.COLLECTOR_JOB_COLLECTION, limit=256, offset=offset)
+        points, offset = clients.get_qdrant().scroll(collection_name=config.LIBRARIAN_JOB_COLLECTION, limit=256, offset=offset)
         jobs += [p.payload for p in points]
         if offset is None:
             return sorted(jobs, key=lambda j: j["requested_at"])
@@ -83,17 +83,17 @@ def pending_jobs() -> List[Dict]:
 def finish_job(job: Dict, failed: bool) -> None:
     """정리하는 동안 같은 문서가 다시 요청됐으면(요청 시각이 바뀜) 작업을 남겨 다시 정리한다"""
     qdrant = clients.get_qdrant()
-    current = qdrant.retrieve(collection_name=config.COLLECTOR_JOB_COLLECTION, ids=[job_id(job["page_id"])])
+    current = qdrant.retrieve(collection_name=config.LIBRARIAN_JOB_COLLECTION, ids=[job_id(job["page_id"])])
     if current and current[0].payload["requested_at"] != job["requested_at"]:
         return
     attempts = job.get("attempts", 0) + 1
     if failed and attempts < JOB_MAX_ATTEMPTS:
-        qdrant.set_payload(collection_name=config.COLLECTOR_JOB_COLLECTION, payload={"attempts": attempts},
+        qdrant.set_payload(collection_name=config.LIBRARIAN_JOB_COLLECTION, payload={"attempts": attempts},
                            points=[job_id(job["page_id"])])
         return
     if failed:
-        logger.error("🚨 [수집가] %d번 실패해 작업을 버립니다 (page_id: %s)", attempts, job["page_id"])
-    qdrant.delete(collection_name=config.COLLECTOR_JOB_COLLECTION, points_selector=[job_id(job["page_id"])])
+        logger.error("🚨 [사서] %d번 실패해 작업을 버립니다 (page_id: %s)", attempts, job["page_id"])
+    qdrant.delete(collection_name=config.LIBRARIAN_JOB_COLLECTION, points_selector=[job_id(job["page_id"])])
 
 
 # --- [원본 읽기] ---
@@ -195,13 +195,13 @@ def refine_document(page_id: str, force: bool = False, dry_run: bool = False):
     bodies = [chunk_body(p.payload) for p in originals]
     digest = source_hash(bodies)
     if not force and not dry_run and stored_hash(page_id) == digest:
-        logger.info("⏭️ [수집가] '%s' 원본이 바뀌지 않아 건너뜁니다.", title)
+        logger.info("⏭️ [사서] '%s' 원본이 바뀌지 않아 건너뜁니다.", title)
         return None
 
     items = list(dict.fromkeys(p.payload["item"] for p in originals if p.payload.get("item")))
     started = time.time()
     refined, input_tokens, output_tokens = refine_text(title, path, bodies, items)
-    logger.info("🧹 [수집가] '%s' 정리 완료: 원본 %d자 → 정리본 %d자, 토큰 %d/%d, %.0f초",
+    logger.info("🧹 [사서] '%s' 정리 완료: 원본 %d자 → 정리본 %d자, 토큰 %d/%d, %.0f초",
                 title, sum(map(len, bodies)), len(refined), input_tokens, output_tokens, time.time() - started)
     if dry_run:
         print(refined)
@@ -283,18 +283,18 @@ def process_jobs() -> int:
                 review_and_notify(job["page_id"], job["requested_by"])
             finish_job(job, failed=False)
         except Exception:
-            logger.exception("🚨 [수집가] 정리 실패 (page_id: %s)", job["page_id"])
+            logger.exception("🚨 [사서] 정리 실패 (page_id: %s)", job["page_id"])
             finish_job(job, failed=True)
     return len(jobs)
 
 def run_forever() -> None:
-    logger.info("🧹 [수집가] 작업 목록 확인을 시작합니다. (%d초 간격)", JOB_POLL_SECONDS)
+    logger.info("🧹 [사서] 작업 목록 확인을 시작합니다. (%d초 간격)", JOB_POLL_SECONDS)
     while True:
         try:
             process_jobs()
         except Exception:
             # DB 연결이 잠깐 끊겨도 서비스는 계속 돈다
-            logger.exception("🚨 [수집가] 작업 목록 확인 실패")
+            logger.exception("🚨 [사서] 작업 목록 확인 실패")
         time.sleep(JOB_POLL_SECONDS)
 
 def indexed_page_ids() -> List[str]:
@@ -306,7 +306,7 @@ def indexed_page_ids() -> List[str]:
             return sorted(page_ids)
 
 def main(args) -> int:
-    parser = argparse.ArgumentParser(description="수집가: 원본 기획서를 정리본으로")
+    parser = argparse.ArgumentParser(description="사서: 원본 기획서를 정리본으로")
     parser.add_argument("page_ids", nargs="*", help="지금 정리할 문서")
     parser.add_argument("--all", action="store_true", help="인덱스된 모든 문서를 지금 정리")
     parser.add_argument("--force", action="store_true", help="원본이 그대로여도 다시 정리")
@@ -325,7 +325,7 @@ def main(args) -> int:
         try:
             refine_document(page_id, force=opts.force, dry_run=opts.dry_run)
         except Exception:
-            logger.exception("🚨 [수집가] 정리 실패 (page_id: %s)", page_id)
+            logger.exception("🚨 [사서] 정리 실패 (page_id: %s)", page_id)
             failed.append(page_id)
 
     with ThreadPoolExecutor(max_workers=opts.workers) as pool:

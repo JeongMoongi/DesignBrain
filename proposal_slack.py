@@ -1,8 +1,8 @@
-"""수집가 제안을 슬랙으로 보내고 처리한다.
+"""사서 제안을 슬랙으로 보내고 처리한다.
 '완료'한 사람에게 DM 한 스레드로 묶어 보내고, 항목마다 [이대로 통과] [고쳐서 통과] [보류] [반려] 버튼을 단다.
 통과하면 노션에 바로 쓰고(notion_writer) 그 문서를 다시 동기화해 정리·검토가 이어지게 한다.
 
-수집가 프로세스(collector.py)는 슬랙 앱 없이 web_client()로 메세지만 보내고, 버튼은 슬랙 앱(slack_bot.py)이 받는다.
+사서 프로세스(librarian.py)는 슬랙 앱 없이 web_client()로 메세지만 보내고, 버튼은 슬랙 앱(slack_bot.py)이 받는다.
 노션 사용자와 슬랙 사용자는 이메일로 맞춘다 (슬랙 앱에 users:read.email 권한 필요)."""
 import json
 import logging
@@ -23,7 +23,7 @@ TYPE_LABELS = {backlog.DECISION: "결정 기록에 추가", backlog.WRITING: "�
 
 
 def web_client():
-    """수집가 프로세스에서 쓰는 슬랙 클라이언트 (토큰이 없으면 None)"""
+    """사서 프로세스에서 쓰는 슬랙 클라이언트 (토큰이 없으면 None)"""
     if not config.SLACK_BOT_TOKEN:
         return None
     from slack_sdk import WebClient
@@ -78,7 +78,7 @@ def doc_links(docs: List[Dict]) -> str:
 
 
 def item_blocks(record: Dict) -> List[Dict]:
-    """제안 하나: 제목·문제·참고 문서, 수집가 제안, 버튼"""
+    """제안 하나: 제목·문제·참고 문서, 사서 제안, 버튼"""
     what = TYPE_LABELS[record["proposal_type"]]
     if record["proposal_type"] == backlog.WRITING:
         what += f" ('{record['new_doc_title']}')"
@@ -108,7 +108,7 @@ def send_review(client, assignee_id: Optional[str], target: Dict, records: List[
     """검토 결과를 담당자에게 한 스레드로 보낸다. requester_found가 아니면 '완료'한 사람 대신 받은 것이라고 알린다."""
     channel = assignee_id
     if not channel:
-        logger.warning("⚠️ [수집가] 제안을 보낼 사람이 없습니다 ('%s' %d건)", target["title"], len(records))
+        logger.warning("⚠️ [사서] 제안을 보낼 사람이 없습니다 ('%s' %d건)", target["title"], len(records))
         return
     note = "" if requester_found else "\n('완료'한 분을 슬랙에서 찾지 못해 대신 보내요)"
     head = client.chat_postMessage(channel=channel, text=(
@@ -116,7 +116,7 @@ def send_review(client, assignee_id: Optional[str], target: Dict, records: List[
         f"통과하면 노션에 바로 반영돼요. 스레드에서 하나씩 처리해 주세요.{note}"))
     for record in records:
         client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
-    logger.info("📬 [수집가] '%s' 제안 %d건을 %s 에게 보냈습니다.", target["title"], len(records), channel)
+    logger.info("📬 [사서] '%s' 제안 %d건을 %s 에게 보냈습니다.", target["title"], len(records), channel)
 
 
 # --- [버튼 처리] ---
@@ -157,7 +157,7 @@ def approve_and_report(client, record: Dict, text: str, user_id: str, channel_id
     try:
         url = apply(client, record, text, user_id)
     except Exception as e:
-        logger.exception("🚨 [수집가 제안] 노션 반영 실패: %s", record["content"])
+        logger.exception("🚨 [사서 제안] 노션 반영 실패: %s", record["content"])
         client.chat_postEphemeral(channel=channel_id, user=user_id,
                                   text=f"❌ 노션에 반영하지 못했어요. 잠시 후 다시 눌러 주세요. ({type(e).__name__}: {str(e)[:200]})")
         return
@@ -205,7 +205,7 @@ def handle_edit(body, client) -> None:
 
 
 def handle_reject(body, client) -> None:
-    """반려: 사유를 묻는다 (수집가가 같은 제안을 다시 내지 않도록 참고한다)"""
+    """반려: 사유를 묻는다 (사서가 같은 제안을 다시 내지 않도록 참고한다)"""
     user_id, channel_id, backlog_id = body["user"]["id"], body["channel"]["id"], body["actions"][0]["value"]
     if refuse(client, channel_id, user_id, backlog.check_open(backlog_id, user_id)):
         return

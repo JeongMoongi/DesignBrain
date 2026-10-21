@@ -72,7 +72,7 @@ def handle_backlog_mention(client, say, event, request_text):
             logger.warning("⚠️ [백로그] 스레드에서 연결 기획서를 찾지 못했습니다: %s", e)
     register_backlog(client, say, request_text, event.get("user"), reply_ts, docs=docs)
 
-# 리마인더 DM 한 통에 담는 백로그 수와 블록 수 (슬랙 메세지는 블록 50개 제한, 항목당 블록 2개, 수집가 제안은 3개)
+# 리마인더 DM 한 통에 담는 백로그 수와 블록 수 (슬랙 메세지는 블록 50개 제한, 항목당 블록 2개, 사서 제안은 3개)
 REMINDER_ITEMS_PER_MESSAGE = 20
 MAX_BLOCKS_PER_MESSAGE = 50
 reminder_stop = threading.Event()

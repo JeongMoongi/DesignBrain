@@ -1,7 +1,7 @@
 """백로그: 기획서와 실제 결정 사항의 차이를 기록해 두었다가, 관련 질문의 답변 끝에 참고 문구로 붙이고
 담당자에게 해결될 때까지 매일 확인 DM을 보낸다. 기획서와 별도 컬렉션(config.BACKLOG_COLLECTION)에 저장한다.
 
-사람이 등록한 백로그 외에, 수집가가 '완료'된 문서를 검토해 낸 제안(kind=proposal)도 같은 곳에 둔다.
+사람이 등록한 백로그 외에, 사서가 '완료'된 문서를 검토해 낸 제안(kind=proposal)도 같은 곳에 둔다.
 제안은 담당자가 [이대로 통과]/[고쳐서 통과]하면 노션에 반영되고, [보류]/[반려]하면 닫힌다."""
 import logging
 import re
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 OPEN, RESOLVED = "open", "resolved"
-# 수집가 제안의 상태 (RESOLVED는 승인되어 노션에 반영됨)
+# 사서 제안의 상태 (RESOLVED는 승인되어 노션에 반영됨)
 HELD, REJECTED = "held", "rejected"
 PROPOSAL = "proposal"
 # 제안 종류: 원본 문서의 결정 기록에 덧붙일 결정 / 새로 만들 문서
@@ -214,7 +214,7 @@ def close(backlog_id: str, user_id: str, status: str, **fields) -> None:
 
 def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, str]],
                  assignee_id: Optional[str], assignee_name: Optional[str], review_id: str) -> Dict:
-    """수집가 검토에서 나온 제안 하나를 저장한다. target은 검토한 문서 {"page_id", "title", "url"}.
+    """사서 검토에서 나온 제안 하나를 저장한다. target은 검토한 문서 {"page_id", "title", "url"}.
     finding: {"type": decision|writing, "title", "problem", "proposal", "new_doc_title"}"""
     backlog_id = str(uuid.uuid4())
     title = finding["title"]
@@ -225,13 +225,13 @@ def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, 
         "content": title,
         "problem": finding.get("problem", ""),
         "proposal": finding.get("proposal", ""),
-        # 수집가가 근거 없이 새로 정한 부분 (승인 전에 확인하도록 슬랙에 따로 보여준다)
+        # 사서가 근거 없이 새로 정한 부분 (승인 전에 확인하도록 슬랙에 따로 보여준다)
         "assumptions": finding.get("assumptions", ""),
         "new_doc_title": finding.get("new_doc_title", ""),
         # 답변 끝 참고 문구: 이 부분은 아직 기획자 확인을 기다린다는 것을 알린다
         "note": f"아직 기획자 확인을 기다리는 부분이에요 — {title}",
         "reporter_id": "",
-        # 슬랙에 보이는 이름 (수집가는 기능을 가리키는 내부 이름이라 사용자에게는 '사서'로 보인다)
+        # 슬랙에 보이는 이름 (사서는 기능을 가리키는 내부 이름이라 사용자에게는 '사서'로 보인다)
         "reporter_name": "사서",
         "assignee_id": assignee_id or "",
         "assignee_name": assignee_name,
@@ -248,7 +248,7 @@ def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, 
 
 
 def proposals_for_page(page_id: str) -> List[Dict]:
-    """이 문서에 대해 수집가가 냈던 제안 전부 (상태 무관, 오래된 순). 같은 제안을 다시 내지 않도록 검토에 넘긴다"""
+    """이 문서에 대해 사서가 냈던 제안 전부 (상태 무관, 오래된 순). 같은 제안을 다시 내지 않도록 검토에 넘긴다"""
     records, offset = [], None
     while True:
         points, offset = clients.get_qdrant().scroll(

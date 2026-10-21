@@ -1,4 +1,4 @@
-"""수집가 검토: 기획자가 '완료'한 문서를 다른 기획서와 비교해 기획자가 처리할 것(충돌, 누락, 새로 정리할 주제)을 찾는다.
+"""사서 검토: 기획자가 '완료'한 문서를 다른 기획서와 비교해 기획자가 처리할 것(충돌, 누락, 새로 정리할 주제)을 찾는다.
 찾은 것은 백로그 제안으로 저장되어 '완료'한 사람에게 슬랙으로 간다 (proposal_slack.py).
 다른 문서는 정리본을 해석자와 같은 도구(agent.py의 검색/목록/문서 읽기)로 찾아 읽는다."""
 import json
@@ -7,7 +7,7 @@ from typing import Dict, List
 import agent
 import backlog
 import clients
-import collector
+import librarian
 import config
 
 logger = logging.getLogger(__name__)
@@ -47,9 +47,9 @@ STATUS_LABELS = {backlog.OPEN: "처리 대기", backlog.RESOLVED: "승인됨", b
 def refined_text(page_id: str) -> str:
     """검토할 문서의 정리본 전체 (정리본이 없으면 원본)"""
     for collection in (config.REFINED_COLLECTION, config.COLLECTION_NAME):
-        points = collector.chunks(collection, page_id)
+        points = librarian.chunks(collection, page_id)
         if points:
-            return "\n".join(collector.chunk_body(p.payload) for p in points)
+            return "\n".join(librarian.chunk_body(p.payload) for p in points)
     return ""
 
 
@@ -69,7 +69,7 @@ def parse_findings(text: str) -> List[Dict]:
     try:
         data = json.loads(text[start:end + 1])
     except json.JSONDecodeError:
-        logger.warning("⚠️ [수집가 검토] 결과 JSON을 읽지 못했습니다: %s", text[:300])
+        logger.warning("⚠️ [사서 검토] 결과 JSON을 읽지 못했습니다: %s", text[:300])
         return []
     findings = []
     for f in data.get("findings", []):
@@ -101,7 +101,7 @@ def review_document(page_id: str, title: str) -> List[Dict]:
                                                   **options, **({"tool_choice": "none"} if final_round else {}))
         usage.append(response.usage)
     findings = parse_findings(response.output_text or "")
-    logger.info("🔎 [수집가 검토] '%s': 제안 %d건, 도구 %d회, 토큰 %d/%d", title, len(findings), len(state.calls),
+    logger.info("🔎 [사서 검토] '%s': 제안 %d건, 도구 %d회, 토큰 %d/%d", title, len(findings), len(state.calls),
                 sum(u.input_tokens for u in usage if u), sum(u.output_tokens for u in usage if u))
     return findings
 

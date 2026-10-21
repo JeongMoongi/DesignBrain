@@ -36,9 +36,9 @@ QA_REPORT_HOUR = 10
 # 문서 진단 결과 (문서마다 최신 하나, 벡터 없음). 웹훅 동기화에서 진단할 것이 있으면 이 슬랙 사용자에게 DM (기본: 질문 기록 요약 받는 사람)
 DIAGNOSIS_COLLECTION = "doc_diagnoses"
 DIAGNOSIS_REPORT_USER_ID = os.environ.get("DIAGNOSIS_REPORT_USER_ID") or QA_REPORT_USER_ID
-# 수집가(collector.py)가 원본을 정리한 정리본과, 정리할 문서 작업 목록 (벡터 없음)
+# 사서(librarian.py)가 원본을 정리한 정리본과, 정리할 문서 작업 목록 (벡터 없음)
 REFINED_COLLECTION = "refined_docs"
-COLLECTOR_JOB_COLLECTION = "collector_jobs"
+LIBRARIAN_JOB_COLLECTION = "librarian_jobs"
 REFINE_MODEL = os.environ.get("REFINE_MODEL", "gpt-6.1-sol")
 REFINE_REASONING_EFFORT = os.environ.get("REFINE_REASONING_EFFORT", "low")
 # 기획자가 '완료'한 문서를 검토해 충돌/누락/새 주제를 찾을 때의 추론 강도 (모델은 REFINE_MODEL)
@@ -56,5 +56,5 @@ AGENT_MODEL = os.environ.get("AGENT_MODEL", "gpt-6-luna")
 AGENT_REASONING_EFFORT = os.environ.get("AGENT_REASONING_EFFORT", "medium")
 # 에이전트가 답하기 전에 도구를 부를 수 있는 최대 횟수 (넘으면 모은 자료로 바로 답하게 한다)
 AGENT_MAX_TOOL_ROUNDS = 8
-# 해석자가 읽는 자료: original = 원본 청크, refined = 수집가의 정리본 (원본은 read_original 도구로 연다)
+# 해석자가 읽는 자료: original = 원본 청크, refined = 사서의 정리본 (원본은 read_original 도구로 연다)
 AGENT_SOURCE = os.environ.get("AGENT_SOURCE", "original")
