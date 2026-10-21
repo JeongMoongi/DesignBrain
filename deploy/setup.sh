@@ -54,13 +54,13 @@ fi
 chmod 600 "$APP_DIR/.env"
 
 echo "== 4. 서비스 등록 (부팅 시 자동 시작, 죽으면 다시 시작)"
-for name in designbrain ngrok; do
+for name in designbrain designbrain-collector ngrok; do
   sed -e "s|__USER__|$APP_USER|g" -e "s|__APP_DIR__|$APP_DIR|g" -e "s|__NGROK_DOMAIN__|$NGROK_DOMAIN|g" \
       -e "s|__NGROK_BIN__|$(command -v ngrok)|g" \
     "$APP_DIR/deploy/$name.service" | sudo tee "/etc/systemd/system/$name.service" > /dev/null
 done
 sudo systemctl daemon-reload
-sudo systemctl enable --now designbrain ngrok
-sudo systemctl restart designbrain ngrok
+sudo systemctl enable --now designbrain designbrain-collector ngrok
+sudo systemctl restart designbrain designbrain-collector ngrok
 
 echo "== 완료. 로그 확인: journalctl -u designbrain -f"

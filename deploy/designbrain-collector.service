@@ -1,0 +1,16 @@
+[Unit]
+Description=DesignBrain 수집가 (원본 기획서 → 정리본)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__APP_DIR__
+# .env는 config.py가 작업 디렉터리에서 읽는다
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__APP_DIR__/.venv/bin/python collector.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

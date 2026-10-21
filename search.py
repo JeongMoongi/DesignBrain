@@ -72,29 +72,29 @@ def name_aliases(name: str) -> set:
     parts = [name, last] + re.split(r"[()（）‘’“”'\"]", last)
     return {alias for alias in map(normalize_name, parts) if len(alias) >= 2}
 
-# (만들 때 쓴 Qdrant 클라이언트, 별칭 목록, 문서 목록). 연결이 바뀌면 (테스트의 임시 DB 등) 다른 DB이므로 다시 만든다
-_name_catalog = None
+# 컬렉션(원본/정리본) → (만들 때 쓴 Qdrant 클라이언트, 별칭 목록, 문서 목록). 연결이 바뀌면 (테스트의 임시 DB 등) 다른 DB이므로 다시 만든다
+_name_catalogs = {}
 _name_catalog_lock = threading.Lock()
 
 def invalidate_name_catalog():
-    global _name_catalog
     with _name_catalog_lock:
-        _name_catalog = None
+        _name_catalogs.clear()
 
-def _get_catalogs() -> tuple:
+def _get_catalogs(collection: str = None) -> tuple:
     """(별칭 → {(page_id, item)}, 문서 이름 → {"page_ids", "items", "path"}). item이 빈 문자열이면 문서 전체.
     문서 이름은 보통 제목이고, 제목이 같은 페이지가 노션의 서로 다른 곳에 있으면 '디고리 > 전투 요소'처럼 상위 이름을 붙인다.
     동기화/삭제 후 다음 질문에서 다시 만든다."""
-    global _name_catalog
+    collection = collection or config.COLLECTION_NAME
     with _name_catalog_lock:
         qdrant = clients.get_qdrant()
-        if _name_catalog is not None and _name_catalog[0] is qdrant:
-            return _name_catalog[1], _name_catalog[2]
+        cached = _name_catalogs.get(collection)
+        if cached is not None and cached[0] is qdrant:
+            return cached[1], cached[2]
         targets = set()
         pages = {}
         offset = None
         while True:
-            points, offset = qdrant.scroll(collection_name=config.COLLECTION_NAME, limit=256, offset=offset,
+            points, offset = qdrant.scroll(collection_name=collection, limit=256, offset=offset,
                                                  with_payload=["page_id", "title", "item", "chunk_idx", "path"], with_vectors=False)
             for p in points:
                 page_id = p.payload.get("page_id")
@@ -114,8 +114,8 @@ def _get_catalogs() -> tuple:
                 catalog.setdefault(alias, set()).add((page_id, item))
         catalog = {alias: t for alias, t in catalog.items() if len(t) <= MAX_TARGETS_PER_ALIAS}
         documents = build_documents(pages)
-        _name_catalog = (qdrant, catalog, documents)
-        logger.info("📇 [이름 목록] 별칭 %d개, 문서 %d개 준비", len(catalog), len(documents))
+        _name_catalogs[collection] = (qdrant, catalog, documents)
+        logger.info("📇 [이름 목록] %s: 별칭 %d개, 문서 %d개 준비", collection, len(catalog), len(documents))
         return catalog, documents
 
 def parent_title(payload) -> str:
@@ -146,12 +146,13 @@ def build_documents(pages: Dict[str, dict]) -> Dict[str, dict]:
             doc["items"] += sorted(items, key=items.get)
     return documents
 
-def _get_name_catalog() -> Dict[str, set]:
-    return _get_catalogs()[0]
+def _get_name_catalog(collection: str = None) -> Dict[str, set]:
+    return _get_catalogs(collection)[0]
 
-def get_documents() -> Dict[str, dict]:
-    """인덱스된 문서 목록: 문서 이름 → {"page_ids", "items"(DB 항목 이름, 문서 안 순서), "path"}"""
-    return _get_catalogs()[1]
+def get_documents(collection: str = None) -> Dict[str, dict]:
+    """인덱스된 문서 목록: 문서 이름 → {"page_ids", "items"(DB 항목 이름, 문서 안 순서), "path"}.
+    collection을 주지 않으면 원본(config.COLLECTION_NAME)"""
+    return _get_catalogs(collection)[1]
 
 def match_names(query: str, catalog: Dict[str, set]) -> List[tuple]:
     """질문에 들어 있는 이름의 대상 목록. 더 긴 이름에 포함된 짧은 이름('변종 분쇄자' 안의 '분쇄자')은 뺀다."""
@@ -171,11 +172,12 @@ def match_names(query: str, catalog: Dict[str, set]) -> List[tuple]:
                 targets.append(target)
     return targets
 
-def search_chunks(query: str, query_vector: List[float]) -> tuple:
+def search_chunks(query: str, query_vector: List[float], collection: str = None) -> tuple:
     """이름이 일치한 문서/항목 안에서 먼저 찾고, 나머지는 벡터 유사도 검색으로 채운다.
-    (검색 결과, 앞쪽의 이름 일치 결과 개수)를 돌려준다."""
+    (검색 결과, 앞쪽의 이름 일치 결과 개수)를 돌려준다. collection을 주지 않으면 원본에서 찾는다."""
+    collection = collection or config.COLLECTION_NAME
     try:
-        catalog = _get_name_catalog()
+        catalog = _get_name_catalog(collection)
     except Exception as e:
         # 이름 일치는 보조 수단이므로 목록을 못 만들어도 벡터 검색으로 답변한다 (다음 질문에서 다시 시도)
         logger.warning("⚠️ [이름 목록] 준비 실패, 벡터 검색만 사용합니다: %s", e)
@@ -186,7 +188,7 @@ def search_chunks(query: str, query_vector: List[float]) -> tuple:
         if item:
             conditions.append(FieldCondition(key="item", match=MatchValue(value=item)))
         per_target.append(clients.get_qdrant().query_points(
-            collection_name=config.COLLECTION_NAME, query=query_vector,
+            collection_name=collection, query=query_vector,
             query_filter=Filter(must=conditions), limit=NAME_MATCH_TOTAL
         ).points)
     # 이름이 여러 개 일치하면 대상별로 번갈아 채워 한 문서가 자리를 독차지하지 않게 한다
@@ -195,7 +197,7 @@ def search_chunks(query: str, query_vector: List[float]) -> tuple:
              if p is not None and not (p.id in seen or seen.add(p.id))][:NAME_MATCH_TOTAL]
 
     similar = clients.get_qdrant().query_points(
-        collection_name=config.COLLECTION_NAME,
+        collection_name=collection,
         query=query_vector,
         limit=SEARCH_LIMIT,
         score_threshold=0.25

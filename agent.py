@@ -39,6 +39,13 @@ SYSTEM_PROMPT = (
     f"- 답변의 맨 마지막 줄에는 '{ai_engine.USED_DOCS_LABEL} 제목1 | 제목2' 형식으로, 답변에 실제로 사용한 문서의 제목만 적어라. "
     f"사용한 문서가 없으면 '{ai_engine.USED_DOCS_LABEL} 없음'이라고 적어라."
 )
+# 정리본을 읽을 때 덧붙이는 안내 (config.AGENT_SOURCE == "refined")
+REFINED_PROMPT = (
+    "\n\n[자료에 대해]\n"
+    "- search_docs/list_docs/read_document가 보여주는 자료는 수집가가 노션 원본 기획서를 읽기 쉽게 다시 쓴 정리본이다. "
+    "문서 제목과 항목 이름은 원본과 같다.\n"
+    "- 정리본만으로 애매하거나, 원문 표현·수치를 그대로 확인해야 하면 read_original로 같은 문서의 원본을 읽어라."
+)
 
 TOOLS = [
     {"type": "function", "name": "search_docs",
@@ -61,6 +68,10 @@ TOOLS = [
          "part": {"type": "integer", "description": "읽을 부분 번호, 1부터 (선택)"}},
          "required": ["title"]}},
 ]
+READ_ORIGINAL_TOOL = {
+    "type": "function", "name": "read_original",
+    "description": "정리본이 아닌 노션 원본 기획서를 읽는다. 사용법은 read_document와 같다.",
+    "parameters": TOOLS[2]["parameters"]}
 
 # 도구 결과가 모델 입력을 지나치게 키우지 않도록 자르는 기준
 SEARCH_RESULT_CHARS = 1000
@@ -70,7 +81,9 @@ LIST_ITEMS_SHOWN = 30
 
 class AgentState:
     """한 질문 동안 도구로 읽은 청크(사용한 문서/도판 선택용)와 도구 호출 기록"""
-    def __init__(self, on_progress):
+    def __init__(self, on_progress, collection: str = None):
+        # 검색/목록/문서 읽기에 쓰는 컬렉션 (원본 또는 정리본)
+        self.collection = collection or config.COLLECTION_NAME
         self.hits = {}
         self.calls = []
         self.query_vector = None
@@ -97,9 +110,9 @@ def chunk_body(payload) -> str:
     return rest if first.startswith("문서: ") else text
 
 
-def document_names() -> Dict[str, str]:
+def document_names(collection: str = None) -> Dict[str, str]:
     """page_id → 문서 이름 (list_docs/read_document에서 쓰는 이름. 같은 제목이 여러 곳에 있으면 상위 이름이 붙는다)"""
-    return {page_id: name for name, doc in search.get_documents().items() for page_id in doc["page_ids"]}
+    return {page_id: name for name, doc in search.get_documents(collection).items() for page_id in doc["page_ids"]}
 
 
 def tool_search_docs(state: AgentState, query: str) -> str:
@@ -107,11 +120,11 @@ def tool_search_docs(state: AgentState, query: str) -> str:
     vector = clients.get_embedding(query)
     if state.query_vector is None:
         state.query_vector = vector
-    results, _ = search.search_chunks(query, vector)
+    results, _ = search.search_chunks(query, vector, state.collection)
     state.add_hits(results)
     if not results:
         return "검색 결과 없음"
-    names = document_names()
+    names = document_names(state.collection)
     lines = []
     for hit in results:
         p = hit.payload
@@ -122,7 +135,7 @@ def tool_search_docs(state: AgentState, query: str) -> str:
 
 def tool_list_docs(state: AgentState, keyword: str = "") -> str:
     state.progress("🗂️ 기획서 목록 확인 중…")
-    documents = search.get_documents()
+    documents = search.get_documents(state.collection)
     key = search.normalize_name(keyword or "")
     lines = []
     for title in sorted(documents):
@@ -153,11 +166,19 @@ def find_title(title: str, documents: Dict[str, dict]):
 
 
 def tool_read_document(state: AgentState, title: str, item: str = "", part: int = 1) -> str:
-    documents = search.get_documents()
+    return read_document(state, state.collection, title, item, part)
+
+
+def tool_read_original(state: AgentState, title: str, item: str = "", part: int = 1) -> str:
+    return read_document(state, config.COLLECTION_NAME, title, item, part, label="원본")
+
+
+def read_document(state: AgentState, collection: str, title: str, item: str = "", part: int = 1, label: str = "문서") -> str:
+    documents = search.get_documents(collection)
     found = find_title(title, documents)
     if not found:
         return f"'{title}' 문서를 찾을 수 없음. list_docs로 정확한 제목을 확인하라."
-    state.progress(f"📖 '{found}' 읽는 중…")
+    state.progress(f"📖 '{found}' {'원본 ' if label == '원본' else ''}읽는 중…")
     page_ids = documents[found]["page_ids"]
     conditions = [FieldCondition(key="page_id", match=MatchAny(any=page_ids))]
     if item:
@@ -168,7 +189,7 @@ def tool_read_document(state: AgentState, title: str, item: str = "", part: int 
         conditions.append(FieldCondition(key="item", match=MatchValue(value=matched)))
     points, offset = [], None
     while True:
-        batch, offset = clients.get_qdrant().scroll(collection_name=config.COLLECTION_NAME, scroll_filter=Filter(must=conditions),
+        batch, offset = clients.get_qdrant().scroll(collection_name=collection, scroll_filter=Filter(must=conditions),
                                                     limit=256, offset=offset, with_payload=True, with_vectors=False)
         points += batch
         if offset is None:
@@ -191,11 +212,12 @@ def tool_read_document(state: AgentState, title: str, item: str = "", part: int 
     part = min(max(part or 1, 1), len(parts))
     state.add_hits(parts[part - 1])
     text = "\n".join(chunk_body(p.payload) for p in parts[part - 1])
-    header = f"[문서: {found}" + (f" > {item}" if item else "") + (f" | {part}/{len(parts)}부분]" if len(parts) > 1 else "]")
+    header = f"[{label}: {found}" + (f" > {item}" if item else "") + (f" | {part}/{len(parts)}부분]" if len(parts) > 1 else "]")
     return f"{header}\n{text}"
 
 
-TOOL_FUNCTIONS = {"search_docs": tool_search_docs, "list_docs": tool_list_docs, "read_document": tool_read_document}
+TOOL_FUNCTIONS = {"search_docs": tool_search_docs, "list_docs": tool_list_docs, "read_document": tool_read_document,
+                  "read_original": tool_read_original}
 
 
 def run_tool(state: AgentState, name: str, arguments: str) -> str:
@@ -216,10 +238,12 @@ def run_tool(state: AgentState, name: str, arguments: str) -> str:
 
 def ask_agent(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, str],
               on_progress: Callable[[str], None] = None) -> Dict:
-    state = AgentState(on_progress)
+    refined = config.AGENT_SOURCE == "refined"
+    state = AgentState(on_progress, config.REFINED_COLLECTION if refined else config.COLLECTION_NAME)
     progress["stage"] = "자료 탐색"
     openai_client = clients.get_openai()
-    options = {"model": config.AGENT_MODEL, "instructions": SYSTEM_PROMPT, "tools": TOOLS,
+    options = {"model": config.AGENT_MODEL, "instructions": SYSTEM_PROMPT + (REFINED_PROMPT if refined else ""),
+               "tools": TOOLS + ([READ_ORIGINAL_TOOL] if refined else []),
                "reasoning": {"effort": config.AGENT_REASONING_EFFORT}}
     history = [{"role": h.get("role", "user"), "content": h.get("content", "")}
                for h in chat_history[-ai_engine.ANSWER_HISTORY_TURNS:]]

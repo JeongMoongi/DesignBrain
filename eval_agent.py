@@ -4,6 +4,7 @@ avoid(틀린 답의 예) 기준으로 채점한다. 답변 전문은 마크다�
     python eval_agent.py                                  # 현재 설정(config.ANSWER_MODE 등)으로
     python eval_agent.py --mode classic                   # 기존 방식 (검색 1회)
     python eval_agent.py --mode agent --model gpt-6.1-sol --effort low
+    python eval_agent.py --mode agent --source refined    # 수집가의 정리본을 읽는 해석자
     python eval_agent.py multi- consult-02                # id가 이 값들로 시작하는 질문만
 
 실제 Qdrant/OpenAI를 사용한다 (채점 포함 질문마다 여러 번 호출).
@@ -66,10 +67,12 @@ def main(args):
     parser.add_argument("--mode", choices=["classic", "agent"], default=config.ANSWER_MODE)
     parser.add_argument("--model", default=config.AGENT_MODEL, help="에이전트 모델")
     parser.add_argument("--effort", default=config.AGENT_REASONING_EFFORT, help="에이전트 추론 강도")
+    parser.add_argument("--source", choices=["original", "refined"], default=config.AGENT_SOURCE, help="에이전트가 읽는 자료")
     parser.add_argument("--out", help="답변 전문을 저장할 마크다운 파일")
     opts = parser.parse_args(args)
     config.ANSWER_MODE, config.AGENT_MODEL, config.AGENT_REASONING_EFFORT = opts.mode, opts.model, opts.effort
-    label = "classic" if opts.mode == "classic" else f"{opts.model} ({opts.effort})"
+    config.AGENT_SOURCE = opts.source
+    label = "classic" if opts.mode == "classic" else f"{opts.model} ({opts.effort}, {opts.source})"
 
     cases = load_cases(opts.prefixes)
     with ThreadPoolExecutor(max_workers=4) as pool:

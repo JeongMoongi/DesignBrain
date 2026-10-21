@@ -63,6 +63,7 @@ PC와 VM이 동시에 돌면 같은 ngrok 도메인을 두고 다투고 리마�
 | 할 일 | 명령 (VM에서) |
 |---|---|
 | 로그 보기 | `journalctl -u designbrain -f` |
+| 수집가 로그 보기 | `journalctl -u designbrain-collector -f` |
 | 최신 코드로 갱신 | `bash /opt/designbrain/deploy/update.sh` |
 | 재시작 | `sudo systemctl restart designbrain` |
 | ngrok 상태 | `systemctl status ngrok` |
