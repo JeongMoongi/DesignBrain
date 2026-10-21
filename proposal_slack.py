@@ -7,6 +7,7 @@
 import json
 import logging
 import threading
+from datetime import datetime
 from typing import Dict, List, Optional
 import backlog
 import config
@@ -98,6 +99,8 @@ def item_blocks(record: Dict) -> List[Dict]:
              "text": {"type": "plain_text", "text": "✏️ 고쳐서 통과"}},
             {"type": "button", "action_id": "proposal_chat", "value": record["backlog_id"],
              "text": {"type": "plain_text", "text": "💬 대화로 고치기"}},
+            {"type": "button", "action_id": "proposal_toss", "value": record["backlog_id"],
+             "text": {"type": "plain_text", "text": "🔁 토스"}},
             {"type": "button", "action_id": "proposal_hold", "value": record["backlog_id"],
              "text": {"type": "plain_text", "text": "⏸️ 보류"}},
             {"type": "button", "action_id": "proposal_reject", "style": "danger", "value": record["backlog_id"],
@@ -336,3 +339,53 @@ def handle_chat_message(client, event) -> bool:
     else:
         client.chat_update(channel=channel_id, ts=placeholder["ts"], text=f"💬 {result['reply']}")
     return True
+
+
+# --- [토스: 다른 담당자에게 넘기기] ---
+def handle_toss(body, client) -> None:
+    """토스: 넘길 사람과 한마디를 묻는다"""
+    user_id, channel_id, backlog_id = body["user"]["id"], body["channel"]["id"], body["actions"][0]["value"]
+    if refuse(client, channel_id, user_id, backlog.check_open(backlog_id, user_id)):
+        return
+    record = backlog.get(backlog_id)
+    client.views_open(trigger_id=body["trigger_id"], view={
+        "type": "modal", "callback_id": "proposal_toss_submit", "private_metadata": modal_metadata(body),
+        "title": {"type": "plain_text", "text": "토스"},
+        "submit": {"type": "plain_text", "text": "넘기기"}, "close": {"type": "plain_text", "text": "취소"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": clip(f"*{record['content']}*", SECTION_CHARS)}},
+            {"type": "input", "block_id": "to", "label": {"type": "plain_text", "text": "넘길 사람"},
+             "element": {"type": "users_select", "action_id": "value"}},
+            {"type": "input", "block_id": "memo", "optional": True, "label": {"type": "plain_text", "text": "한마디"},
+             "element": {"type": "plain_text_input", "action_id": "value", "multiline": True,
+                         "placeholder": {"type": "plain_text", "text": "예: 전투 담당이 판단할 내용이라 넘겨요"}}}]})
+
+
+def handle_toss_submit(body, client) -> None:
+    """담당자를 바꾸고, 새 담당자에게 제안을 보내고, 원래 메세지에 넘겼다고 남긴다.
+    대화로 고치던 중이었으면 그 대화 기록은 넘어가고, 새 담당자는 자기 DM에서 새로 대화 스레드를 연다."""
+    view = body["view"]
+    meta = json.loads(view["private_metadata"])
+    values = view["state"]["values"]
+    to_user = values["to"]["value"].get("selected_user")
+    memo = (values["memo"]["value"].get("value") or "").strip()
+    user_id = body["user"]["id"]
+    if not to_user or to_user == user_id or refuse(client, meta["channel"], user_id, backlog.check_open(meta["backlog_id"], user_id)):
+        return
+    record = backlog.get(meta["backlog_id"])
+    if record.get("chat_ts"):
+        client.chat_postMessage(channel=meta["channel"], thread_ts=record["chat_ts"],
+                                text=f"🔁 <@{to_user}> 님에게 넘겼어요. 이 스레드는 더 이상 쓰지 않아요.")
+    tosses = record.get("toss_history", []) + [{"from": user_id, "to": to_user, "memo": memo,
+                                                "at": datetime.now(backlog.KST).isoformat(timespec="seconds")}]
+    fields = {"assignee_id": to_user, "assignee_name": user_name(client, to_user), "chat_ts": "", "toss_history": tosses}
+    backlog.update(record["backlog_id"], **fields)
+    record.update(fields)
+
+    head = client.chat_postMessage(channel=to_user, text=(
+        f"🔁 <@{user_id}> 님이 사서 제안을 넘겼어요." + (f"\n> {memo}" if memo else "")
+        + "\n스레드에서 처리해 주세요. 담당이 아니면 다시 [🔁 토스]로 넘길 수 있어요."))
+    sent = client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
+    backlog.update(record["backlog_id"], slack_channel=sent["channel"], slack_ts=sent["ts"])
+    update_item(client, meta["channel"], find_message(client, meta), record["backlog_id"], f"🔁 <@{to_user}> 님에게 넘겼어요.")
+    logger.info("🔁 [사서 제안] %s → %s: %s", user_id, to_user, record["content"])

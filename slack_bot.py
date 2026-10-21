@@ -105,6 +105,16 @@ def init_slack():
         ack()
         proposal_slack.handle_chat(body, client)
 
+    @slack_app.action("proposal_toss")
+    def handle_proposal_toss(ack, body, client):
+        ack()
+        proposal_slack.handle_toss(body, client)
+
+    @slack_app.view("proposal_toss_submit")
+    def handle_proposal_toss_submit(ack, body, client):
+        ack()
+        proposal_slack.handle_toss_submit(body, client)
+
     @slack_app.action("proposal_hold")
     def handle_proposal_hold(ack, body, client):
         ack()

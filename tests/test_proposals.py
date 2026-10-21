@@ -431,3 +431,42 @@ def test_people_backlog_reminder_says_document_was_updated():
     record = {"backlog_id": "b1", "content": "수치 수정", "created_at": "2026-10-01", "docs": [], "doc_updated_at": "2026-10-21T10:00"}
     text = backlog_slack.reminder_item_blocks(record)[0]["text"]["text"]
     assert "📝 관련 기획서가 2026-10-21에 갱신됐어요" in text
+
+
+# --- 토스 ---
+def toss_view(slack, to_user, memo=""):
+    view = slack.views[-1]
+    view["state"] = {"values": {"to": {"value": {"selected_user": to_user}}, "memo": {"value": {"value": memo}}}}
+    return view
+
+
+def test_toss_moves_proposal_to_another_planner(store, notion_fakes):
+    record, slack = add(), FakeSlack()
+    body = button_body(record, "proposal_chat")
+    proposal_slack.handle_chat(body, slack)
+    slack.thread = [body["message"]]
+    proposal_slack.handle_toss(button_body(record, "proposal_toss"), slack)
+    assert slack.views[-1]["callback_id"] == "proposal_toss_submit"
+
+    proposal_slack.handle_toss_submit({"user": {"id": "U1"}, "view": toss_view(slack, "U2", "전투 담당이라 넘겨요")}, slack)
+    saved = backlog.get(record["backlog_id"])
+    assert (saved["assignee_id"], saved["assignee_name"], saved["chat_ts"]) == ("U2", "이름-U2", "")
+    assert saved["toss_history"][0]["memo"] == "전투 담당이라 넘겨요"
+    old_chat, head, item = slack.posts[-3:]
+    assert old_chat["thread_ts"] == "1.0" and "넘겼어요" in old_chat["text"]
+    assert head["channel"] == "U2" and "<@U1> 님이 사서 제안을 넘겼어요.\n> 전투 담당이라 넘겨요" in head["text"]
+    assert item["thread_ts"] == f"{len(slack.posts) - 1}.0" and saved["slack_ts"] == f"{len(slack.posts)}.0"
+    assert "<@U2> 님에게 넘겼어요" in slack.updates[-1]["blocks"][-1]["elements"][0]["text"]
+
+    # 이제 원래 담당자는 처리할 수 없고 새 담당자가 처리한다
+    proposal_slack.handle_hold(button_body(saved, "proposal_hold", user="U1"), slack)
+    assert "담당자만" in slack.ephemerals[-1]["text"]
+    proposal_slack.handle_hold(button_body(saved, "proposal_hold", user="U2"), slack)
+    assert backlog.get(record["backlog_id"])["status"] == backlog.HELD
+
+
+def test_toss_to_self_does_nothing(store):
+    record, slack = add(), FakeSlack()
+    proposal_slack.handle_toss(button_body(record, "proposal_toss"), slack)
+    proposal_slack.handle_toss_submit({"user": {"id": "U1"}, "view": toss_view(slack, "U1")}, slack)
+    assert backlog.get(record["backlog_id"])["assignee_id"] == "U1" and slack.posts == []
