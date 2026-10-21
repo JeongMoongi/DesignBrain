@@ -108,6 +108,18 @@ def test_agent_answers_after_tools(docs, fake_responses):
     assert fake.requests[1]["input"][0]["call_id"] == "c1"
 
 
+def test_agent_summary_request_is_noted_in_answer(docs, fake_responses):
+    fake = fake_responses(
+        response([call("request_summary", topic="아이템 각인 정리", reason="흩어져 있음", docs=["아이템"])], id="r1"),
+        response(text="정리한 답변\n사용한 문서: 없음", id="r2"))
+    result = agent.ask_agent("각인 다 알려줘", [], {}, None)
+    assert result["AI_답변"] == f"정리한 답변\n\n{agent.SUMMARY_REQUESTED_NOTE}"
+    assert result["summary_requests"] == ["아이템 각인 정리"]
+    assert "request_summary" in [t["name"] for t in fake.requests[0]["tools"]]
+    import librarian
+    assert [j["question"] for j in librarian.pending_jobs()] == ["각인 다 알려줘"]
+
+
 def test_agent_stops_tools_after_max_rounds(docs, fake_responses, monkeypatch):
     monkeypatch.setattr(config, "AGENT_MAX_TOOL_ROUNDS", 2)
     fake = fake_responses(response([call("list_docs")]), response([call("list_docs")]),

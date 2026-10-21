@@ -23,7 +23,10 @@ SYSTEM_PROMPT = (
     "3. 자료 안의 참조를 따라가라. 찾은 항목의 속성에 다른 데이터의 이름이 들어 있으면(예: 아이템의 각인 A='협공') "
     "사용자는 그것도 그 항목의 일부로 받아들인다. 이름만 전하지 말고 반드시 그 항목을 검색해 내용을 확인한 뒤 함께 설명하라.\n"
     "4. '챕터 1의 적'처럼 한 문서에 정리돼 있지 않은 질문은 일반몹/미니보스/보스 등 범주별로 각각 찾아 모아라.\n"
-    "5. 이미 대화 기록이나 앞선 도구 결과로 충분하면 더 찾지 말고 답하라.\n\n"
+    "5. 이미 대화 기록이나 앞선 도구 결과로 충분하면 더 찾지 말고 답하라.\n"
+    "6. 질문이 어떤 대상의 전체 목록·구성·규칙 모음을 묻는데(예: '챕터 1의 적', '상점에서 파는 것') 그것을 한 문서가 정리하고 있지 않아 "
+    "여러 문서에서 모아야 했다면, 답하기 전에 request_summary로 기획서 정리 담당 '사서'에게 그 주제의 종합 문서를 요청하라. "
+    "설계 상담·추천·조합처럼 의견을 묻는 질문에는 요청하지 마라. 질문 하나에 한 번만 요청한다.\n\n"
     "[답변 원칙]\n"
     "- 결론부터 말하고, 근거가 되는 기획서 내용을 이어서 설명하라. 항목명과 수치는 원문 그대로 인용하라.\n"
     "- 리더/파트너, 일반몹/미니보스/보스처럼 비슷하지만 다른 대상을 섞지 마라. 확인되지 않으면 추측하지 마라.\n"
@@ -68,6 +71,17 @@ TOOLS = [
          "part": {"type": "integer", "description": "읽을 부분 번호, 1부터 (선택)"}},
          "required": ["title"]}},
 ]
+REQUEST_SUMMARY_TOOL = {
+    "type": "function", "name": "request_summary",
+    "description": "여러 기획서에 흩어져 있어 모으기 어려웠던 주제의 종합 문서를 사서에게 요청한다. 사서가 초안을 써서 기획자에게 승인받는다. "
+                   "답변에 필요한 자료를 다 찾은 뒤에 부른다.",
+    "parameters": {"type": "object", "properties": {
+        "topic": {"type": "string", "description": "종합 문서의 주제. 문서 제목처럼 짧게 (예: '챕터 1 적 구성')"},
+        "reason": {"type": "string", "description": "어떤 정보가 어느 문서들에 흩어져 있었는지 한두 문장"},
+        "docs": {"type": "array", "items": {"type": "string"}, "description": "정보를 모은 문서 이름들"}},
+        "required": ["topic", "reason", "docs"]}}
+# 사서에게 종합을 요청했을 때 답변 끝에 붙이는 안내
+SUMMARY_REQUESTED_NOTE = "📚 여러 문서에 흩어진 정보라 사서에게 종합 문서 정리를 요청해 뒀어요."
 READ_ORIGINAL_TOOL = {
     "type": "function", "name": "read_original",
     "description": "정리본이 아닌 노션 원본 기획서를 읽는다. 사용법은 read_document와 같다.",
@@ -84,6 +98,9 @@ class AgentState:
     def __init__(self, on_progress, collection: str = None):
         # 검색/목록/문서 읽기에 쓰는 컬렉션 (원본 또는 정리본)
         self.collection = collection or config.COLLECTION_NAME
+        self.query = ""
+        # 사서에게 요청한 종합 문서 주제
+        self.summary_requests = []
         self.hits = {}
         self.calls = []
         self.query_vector = None
@@ -216,8 +233,20 @@ def read_document(state: AgentState, collection: str, title: str, item: str = ""
     return f"{header}\n{text}"
 
 
+def tool_request_summary(state: AgentState, topic: str, reason: str = "", docs: List[str] = ()) -> str:
+    if state.summary_requests:
+        return "이 질문으로는 이미 요청했다."
+    state.summary_requests.append(topic)
+    # 평가 실행 등에서는 요청을 기록만 하고 실제로 올리지 않는다
+    if config.SYNTHESIS_REQUESTS:
+        import librarian
+        librarian.enqueue_synthesis(topic, reason, state.query, list(docs))
+    logger.info("📚 [종합 요청] %s (%s)", topic, reason)
+    return "요청했다. 사서가 초안을 만들어 기획자에게 승인받는다. 이제 답하라."
+
+
 TOOL_FUNCTIONS = {"search_docs": tool_search_docs, "list_docs": tool_list_docs, "read_document": tool_read_document,
-                  "read_original": tool_read_original}
+                  "read_original": tool_read_original, "request_summary": tool_request_summary}
 
 
 def run_tool(state: AgentState, name: str, arguments: str) -> str:
@@ -240,10 +269,11 @@ def ask_agent(query: str, chat_history: List[Dict[str, str]], progress: Dict[str
               on_progress: Callable[[str], None] = None) -> Dict:
     refined = config.AGENT_SOURCE == "refined"
     state = AgentState(on_progress, config.REFINED_COLLECTION if refined else config.COLLECTION_NAME)
+    state.query = query
     progress["stage"] = "자료 탐색"
     openai_client = clients.get_openai()
     options = {"model": config.AGENT_MODEL, "instructions": SYSTEM_PROMPT + (REFINED_PROMPT if refined else ""),
-               "tools": TOOLS + ([READ_ORIGINAL_TOOL] if refined else []),
+               "tools": TOOLS + ([READ_ORIGINAL_TOOL] if refined else []) + [REQUEST_SUMMARY_TOOL],
                "reasoning": {"effort": config.AGENT_REASONING_EFFORT}}
     history = [{"role": h.get("role", "user"), "content": h.get("content", "")}
                for h in chat_history[-ai_engine.ANSWER_HISTORY_TURNS:]]
@@ -273,5 +303,8 @@ def ask_agent(query: str, chat_history: List[Dict[str, str]], progress: Dict[str
     normalized_reply = search.normalize_name(reply)
     image_hits = [h for h in hits if not h.payload.get("item") or search.normalize_name(h.payload["item"]) in normalized_reply]
     result = ai_engine.finish_answer(query, reply, hits, image_hits, " | ".join(state.calls), state.query_vector)
+    if state.summary_requests:
+        result["AI_답변"] += f"\n\n{SUMMARY_REQUESTED_NOTE}"
     result["usage"] = {"input_tokens": input_tokens, "output_tokens": output_tokens, "tool_calls": len(state.calls)}
+    result["summary_requests"] = state.summary_requests
     return result

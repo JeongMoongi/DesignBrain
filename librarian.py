@@ -73,6 +73,21 @@ def enqueue(page_id: str, requested_by: str = None) -> None:
         PointStruct(id=job_id(page_id), vector={}, payload={"page_id": page_id, "requested_at": time.time(), "attempts": 0,
                                                             "requested_by": requested_by})])
 
+SYNTHESIS = "synthesis"
+
+def synthesis_job_id(topic: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"librarian-synthesis:{''.join(topic.split()).lower()}"))
+
+def enqueue_synthesis(topic: str, reason: str, question: str, doc_names: List[str]) -> None:
+    """@Brain이 요청한 종합 문서 작업을 올린다 (synthesis.py). 같은 주제가 기다리고 있으면 하나로 합쳐진다"""
+    clients.get_qdrant().upsert(collection_name=config.LIBRARIAN_JOB_COLLECTION, points=[
+        PointStruct(id=synthesis_job_id(topic), vector={}, payload={
+            "kind": SYNTHESIS, "topic": topic, "reason": reason, "question": question, "doc_names": doc_names,
+            "requested_at": time.time(), "attempts": 0})])
+
+def job_key(job: Dict) -> str:
+    return synthesis_job_id(job["topic"]) if job.get("kind") == SYNTHESIS else job_id(job["page_id"])
+
 def pending_jobs() -> List[Dict]:
     jobs, offset = [], None
     while True:
@@ -82,19 +97,19 @@ def pending_jobs() -> List[Dict]:
             return sorted(jobs, key=lambda j: j["requested_at"])
 
 def finish_job(job: Dict, failed: bool) -> None:
-    """정리하는 동안 같은 문서가 다시 요청됐으면(요청 시각이 바뀜) 작업을 남겨 다시 정리한다"""
+    """정리하는 동안 같은 작업이 다시 요청됐으면(요청 시각이 바뀜) 작업을 남겨 다시 처리한다"""
     qdrant = clients.get_qdrant()
-    current = qdrant.retrieve(collection_name=config.LIBRARIAN_JOB_COLLECTION, ids=[job_id(job["page_id"])])
+    key = job_key(job)
+    current = qdrant.retrieve(collection_name=config.LIBRARIAN_JOB_COLLECTION, ids=[key])
     if current and current[0].payload["requested_at"] != job["requested_at"]:
         return
     attempts = job.get("attempts", 0) + 1
     if failed and attempts < JOB_MAX_ATTEMPTS:
-        qdrant.set_payload(collection_name=config.LIBRARIAN_JOB_COLLECTION, payload={"attempts": attempts},
-                           points=[job_id(job["page_id"])])
+        qdrant.set_payload(collection_name=config.LIBRARIAN_JOB_COLLECTION, payload={"attempts": attempts}, points=[key])
         return
     if failed:
-        logger.error("🚨 [사서] %d번 실패해 작업을 버립니다 (page_id: %s)", attempts, job["page_id"])
-    qdrant.delete(collection_name=config.LIBRARIAN_JOB_COLLECTION, points_selector=[job_id(job["page_id"])])
+        logger.error("🚨 [사서] %d번 실패해 작업을 버립니다 (%s)", attempts, job.get("page_id") or job.get("topic"))
+    qdrant.delete(collection_name=config.LIBRARIAN_JOB_COLLECTION, points_selector=[key])
 
 
 # --- [원본 읽기] ---
@@ -277,16 +292,20 @@ def review_and_notify(page_id: str, requested_by: str) -> List[Dict]:
 # --- [실행] ---
 def process_jobs() -> int:
     """쌓인 작업을 오래된 것부터 처리하고 처리한 수를 돌려준다.
-    '완료'로 들어온 작업(requested_by)은 정리 후 검토까지 한다."""
+    '완료'로 들어온 작업(requested_by)은 정리 후 검토까지 하고, 종합 요청은 초안을 만들어 보낸다."""
+    import synthesis
     jobs = pending_jobs()
     for job in jobs:
         try:
-            refine_document(job["page_id"])
-            if job.get("requested_by"):
-                review_and_notify(job["page_id"], job["requested_by"])
+            if job.get("kind") == SYNTHESIS:
+                synthesis.handle_request(job)
+            else:
+                refine_document(job["page_id"])
+                if job.get("requested_by"):
+                    review_and_notify(job["page_id"], job["requested_by"])
             finish_job(job, failed=False)
         except Exception:
-            logger.exception("🚨 [사서] 정리 실패 (page_id: %s)", job["page_id"])
+            logger.exception("🚨 [사서] 작업 실패 (%s)", job.get("page_id") or job.get("topic"))
             finish_job(job, failed=True)
     return len(jobs)
 

@@ -61,16 +61,21 @@ def earlier_proposals(page_id: str) -> str:
     return "\n".join(lines) or "(없음)"
 
 
-def parse_findings(text: str) -> List[Dict]:
-    """모델 출력의 JSON에서 형식이 맞는 항목만 고른다"""
+def parse_json(text: str) -> Dict:
+    """모델 출력에서 JSON 객체를 꺼낸다 (앞뒤에 설명이 붙어도). 읽지 못하면 빈 dict"""
     start, end = text.find("{"), text.rfind("}")
     if start == -1:
-        return []
+        return {}
     try:
-        data = json.loads(text[start:end + 1])
+        return json.loads(text[start:end + 1])
     except json.JSONDecodeError:
-        logger.warning("⚠️ [사서 검토] 결과 JSON을 읽지 못했습니다: %s", text[:300])
-        return []
+        logger.warning("⚠️ [사서] 결과 JSON을 읽지 못했습니다: %s", text[:300])
+        return {}
+
+
+def parse_findings(text: str) -> List[Dict]:
+    """모델 출력의 JSON에서 형식이 맞는 항목만 고른다"""
+    data = parse_json(text)
     findings = []
     for f in data.get("findings", []):
         if f.get("type") in (backlog.DECISION, backlog.WRITING) and f.get("title") and f.get("proposal"):
@@ -80,13 +85,11 @@ def parse_findings(text: str) -> List[Dict]:
     return findings
 
 
-def review_document(page_id: str, title: str) -> List[Dict]:
-    """문서를 검토해 제안 목록을 돌려준다. 다른 문서는 도구로 정리본을 찾아 읽는다."""
+def run_with_tools(instructions: str, request: str, label: str) -> str:
+    """사서가 해석자와 같은 도구(정리본 검색/목록/읽기, 원본 읽기)로 자료를 찾아 가며 일하고, 마지막 출력 글을 돌려준다"""
     state = agent.AgentState(None, config.REFINED_COLLECTION)
-    tools = agent.TOOLS + [agent.READ_ORIGINAL_TOOL]
-    options = {"model": config.REFINE_MODEL, "instructions": REVIEW_PROMPT, "tools": tools,
+    options = {"model": config.REFINE_MODEL, "instructions": instructions, "tools": agent.TOOLS + [agent.READ_ORIGINAL_TOOL],
                "reasoning": {"effort": config.REVIEW_REASONING_EFFORT}}
-    request = (f"[검토할 문서] {title}\n\n{refined_text(page_id)}\n\n[이미 낸 제안]\n{earlier_proposals(page_id)}")
     openai_client = clients.get_openai()
     response = openai_client.responses.create(input=[{"role": "user", "content": request}], **options)
     usage = [response.usage]
@@ -100,9 +103,16 @@ def review_document(page_id: str, title: str) -> List[Dict]:
         response = openai_client.responses.create(previous_response_id=response.id, input=outputs,
                                                   **options, **({"tool_choice": "none"} if final_round else {}))
         usage.append(response.usage)
-    findings = parse_findings(response.output_text or "")
-    logger.info("🔎 [사서 검토] '%s': 제안 %d건, 도구 %d회, 토큰 %d/%d", title, len(findings), len(state.calls),
+    logger.info("🔎 [사서] %s: 도구 %d회, 토큰 %d/%d", label, len(state.calls),
                 sum(u.input_tokens for u in usage if u), sum(u.output_tokens for u in usage if u))
+    return response.output_text or ""
+
+
+def review_document(page_id: str, title: str) -> List[Dict]:
+    """문서를 검토해 제안 목록을 돌려준다. 다른 문서는 도구로 정리본을 찾아 읽는다."""
+    request = f"[검토할 문서] {title}\n\n{refined_text(page_id)}\n\n[이미 낸 제안]\n{earlier_proposals(page_id)}"
+    findings = parse_findings(run_with_tools(REVIEW_PROMPT, request, f"'{title}' 검토"))
+    logger.info("🔎 [사서 검토] '%s': 제안 %d건", title, len(findings))
     return findings
 
 

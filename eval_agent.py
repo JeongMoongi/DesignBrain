@@ -58,7 +58,7 @@ def run_case(case):
         answer = res["AI_답변"]
     verdict = judge(case, answer)
     return {"case": case, "answer": answer, "seconds": elapsed, "usage": res.get("usage", {}),
-            "tools": res.get("search_query", ""), "verdict": verdict}
+            "tools": res.get("search_query", ""), "summary_requests": res.get("summary_requests", []), "verdict": verdict}
 
 
 def main(args):
@@ -72,6 +72,8 @@ def main(args):
     opts = parser.parse_args(args)
     config.ANSWER_MODE, config.AGENT_MODEL, config.AGENT_REASONING_EFFORT = opts.mode, opts.model, opts.effort
     config.AGENT_SOURCE = opts.source
+    # 평가 중 종합 요청은 결과에만 남기고 사서 작업 목록에는 올리지 않는다
+    config.SYNTHESIS_REQUESTS = False
     label = "classic" if opts.mode == "classic" else f"{opts.model} ({opts.effort}, {opts.source})"
 
     cases = load_cases(opts.prefixes)
@@ -88,7 +90,8 @@ def main(args):
         total_expect, total_hit, total_avoid = total_expect + n, total_hit + hit, total_avoid + bad
         usage = r["usage"]
         cost = f" | 도구 {usage.get('tool_calls', 0)}회, 토큰 {usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)}" if usage else ""
-        summary = f"{case['id']:<11} 기대 {hit}/{n}  오답 {bad}  {r['seconds']:.0f}s{cost}"
+        requested = f" | 종합 요청: {', '.join(r['summary_requests'])}" if r["summary_requests"] else ""
+        summary = f"{case['id']:<11} 기대 {hit}/{n}  오답 {bad}  {r['seconds']:.0f}s{cost}{requested}"
         print(f"{summary}\n   {v.get('comment', '')}")
         lines += [f"## {case['id']} — {case['question']}", "", f"`{summary}`", "", f"> 채점: {v.get('comment', '')}", "",
                   f"도구: {r['tools']}", "", r["answer"], ""]

@@ -59,3 +59,5 @@ AGENT_REASONING_EFFORT = os.environ.get("AGENT_REASONING_EFFORT", "medium")
 AGENT_MAX_TOOL_ROUNDS = 8
 # 해석자가 읽는 자료: original = 원본 청크, refined = 사서의 정리본 (원본은 read_original 도구로 연다)
 AGENT_SOURCE = os.environ.get("AGENT_SOURCE", "original")
+# 에이전트가 흩어진 정보의 종합 문서를 사서에게 요청하면 실제로 작업 목록에 올린다 (평가 실행에서는 끄고 기록만 한다)
+SYNTHESIS_REQUESTS = True

@@ -105,20 +105,21 @@ def item_blocks(record: Dict) -> List[Dict]:
 
 
 def send_review(client, assignee_id: Optional[str], target: Dict, records: List[Dict], requester_found: bool = True,
-                unreadable: str = "") -> None:
-    """검토 결과를 담당자에게 한 스레드로 보낸다. requester_found가 아니면 '완료'한 사람 대신 받은 것이라고 알린다.
-    unreadable(AI가 읽지 못한 부분 안내)은 첫 메세지에 붙인다. 제안이 없어도 이 안내만 보낸다."""
+                unreadable: str = "", intro: str = "") -> None:
+    """제안을 담당자에게 한 스레드로 보낸다. requester_found가 아니면 받을 사람 대신 받은 것이라고 알린다.
+    unreadable(AI가 읽지 못한 부분 안내)은 첫 메세지에 붙인다. 제안이 없어도 이 안내만 보낸다.
+    intro를 주면 첫 메세지 문구를 바꾼다 (기본: '완료'한 문서를 정리하며 찾은 것)."""
     channel = assignee_id
     if not channel:
         logger.warning("⚠️ [사서] 제안을 보낼 사람이 없습니다 ('%s' %d건)", target["title"], len(records))
         return
     link = f"<{target['url']}|{target['title']}>"
-    lines = [f"🧹 {link} 을(를) 정리하면서 확인이 필요한 것 *{len(records)}건*을 찾았어요.\n"
-             "통과하면 노션에 바로 반영돼요. 스레드에서 하나씩 처리해 주세요." if records else f"🧹 {link} 을(를) 정리했어요."]
+    lines = [intro or (f"🧹 {link} 을(를) 정리하면서 확인이 필요한 것 *{len(records)}건*을 찾았어요.\n"
+                       "통과하면 노션에 바로 반영돼요. 스레드에서 하나씩 처리해 주세요." if records else f"🧹 {link} 을(를) 정리했어요.")]
     if unreadable:
         lines.append(unreadable)
     if not requester_found:
-        lines.append("('완료'한 분을 슬랙에서 찾지 못해 대신 보내요)")
+        lines.append("(받으실 분을 슬랙에서 찾지 못해 대신 보내요)")
     head = client.chat_postMessage(channel=channel, text="\n\n".join(lines))
     for record in records:
         client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
