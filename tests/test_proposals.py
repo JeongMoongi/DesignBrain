@@ -162,6 +162,14 @@ def test_item_shows_assumptions_before_proposal(store):
     assert "근거 없이" not in proposal_slack.item_blocks(add())[1]["text"]["text"]
 
 
+def test_unreadable_parts_are_sent_even_without_proposals():
+    slack = FakeSlack()
+    proposal_slack.send_review(slack, "U1", TARGET, [], unreadable="📎 *사서가 읽지 못한 부분* …")
+    assert len(slack.posts) == 1
+    assert slack.posts[0]["text"].startswith("🧹 <https://notion/P1|디고리> 을(를) 정리했어요.")
+    assert "📎 *사서가 읽지 못한 부분*" in slack.posts[0]["text"]
+
+
 def test_slack_user_is_found_by_name_when_emails_differ(monkeypatch):
     monkeypatch.setattr(notion_writer, "user_info", lambda notion_id: {"email": "me@company.com", "name": "정 문기"})
 

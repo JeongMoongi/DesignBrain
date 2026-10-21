@@ -27,6 +27,7 @@ from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 import backlog
 import clients
 import config
+import doc_diagnosis
 import indexing
 
 logger = logging.getLogger("librarian")
@@ -266,8 +267,10 @@ def review_and_notify(page_id: str, requested_by: str) -> List[Dict]:
                for f in findings]
     clients.get_qdrant().set_payload(collection_name=config.REFINED_COLLECTION, payload={"reviewed_hash": head["source_hash"]},
                                      points=[refined_point_id(page_id, 0)])
-    if records and slack:
-        proposal_slack.send_review(slack, assignee_id, target, records, requester_found=bool(requester))
+    # AI가 읽지 못한 부분(DB 뷰 등)은 검토로 찾을 수 없으므로 문서 진단 기록에서 가져와 함께 알린다
+    unreadable = doc_diagnosis.unreadable_notice(page_id)
+    if (records or unreadable) and slack:
+        proposal_slack.send_review(slack, assignee_id, target, records, requester_found=bool(requester), unreadable=unreadable)
     return records
 
 

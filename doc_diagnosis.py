@@ -1,7 +1,8 @@
-"""문서 진단: 동기화한 기획서가 AI가 읽기 어려운 구조인지 규칙으로 찾아 기록하고, 담당자에게 알린다.
-패턴을 모으는 단계라 문서를 고치거나 판단하지 않고 사실만 남긴다 (어떻게 처리할지는 모인 패턴을 보고 정한다).
+"""문서 진단: 동기화한 기획서가 AI가 읽기 어려운 구조인지 규칙으로 찾아 기록한다.
+문서를 고치거나 판단하지 않고 사실만 남긴다.
 
-진단 결과는 문서마다 최신 것 하나를 별도 컬렉션에 저장한다 → diagnosis_report.py로 전체 패턴을 모아 본다."""
+진단 결과는 문서마다 최신 것 하나를 별도 컬렉션에 저장한다 → diagnosis_report.py로 전체 패턴을 모아 본다.
+AI가 아예 읽지 못한 부분(DB 뷰, 공유 안 된 링크/참조)은 사서가 '완료'한 사람에게 보내는 메세지에 함께 붙는다 (unreadable_notice)."""
 import logging
 from datetime import datetime
 from typing import Dict, List
@@ -66,13 +67,26 @@ def diagnose(doc_data: Dict, documents: Dict[str, dict]) -> List[Dict]:
     return findings
 
 
-def format_report(doc_data: Dict, findings: List[Dict]) -> str:
-    title, url = doc_data.get("title", "제목 없음"), doc_data.get("url", "")
-    lines = [f"📋 *문서 진단* : <{url}|{title}>" if url else f"📋 *문서 진단* : {title}"]
+# AI가 아예 읽을 수 없어 사서 검토에서도 빠지는 진단과, 문서를 쓴 사람이 고치는 방법.
+# 사서가 '완료'한 사람에게 제안을 보낼 때 함께 알린다 (나머지 진단은 사서 검토가 더 잘 다루므로 기록만 남긴다)
+UNREADABLE_HINTS = {
+    "linked_view": "링크된 DB 뷰는 읽을 수 없어요. 원본 DB를 문서에 넣거나 원본 DB 페이지를 따로 등록해 주세요",
+    "unshared_link": "링크된 페이지가 연동에 공유되지 않았어요",
+    "unshared_relation": "관계형 속성이 가리키는 DB가 연동에 공유되지 않았어요",
+}
+
+
+def unreadable_notice(page_id: str) -> str:
+    """저장된 진단 중 AI가 읽지 못한 부분 안내 (없으면 빈 문자열)"""
+    points = clients.get_qdrant().retrieve(collection_name=config.DIAGNOSIS_COLLECTION, ids=[page_id])
+    findings = [f for f in (points[0].payload.get("findings", []) if points else []) if f["kind"] in UNREADABLE_HINTS]
+    if not findings:
+        return ""
+    lines = ["📎 *사서가 읽지 못한 부분* — AI가 볼 수 없어 검토에서도 빠졌어요"]
     for f in findings:
         shown = ", ".join(f["details"][:DETAIL_SHOWN])
         more = f" 외 {len(f['details']) - DETAIL_SHOWN}개" if len(f["details"]) > DETAIL_SHOWN else ""
-        lines.append(f"• {KINDS[f['kind']]} ({f['count']}) : {shown}{more}")
+        lines.append(f"• {KINDS[f['kind']]} ({f['count']}) : {shown}{more} — {UNREADABLE_HINTS[f['kind']]}")
     return "\n".join(lines)
 
 
@@ -88,24 +102,13 @@ def delete(page_id: str) -> None:
     clients.get_qdrant().delete(collection_name=config.DIAGNOSIS_COLLECTION, points_selector=[page_id])
 
 
-def notify(text: str) -> None:
-    """담당자에게 DM. 슬랙 봇이 떠 있지 않으면(스크립트 실행 등) 보내지 않는다"""
-    import slack_bot
-    if not config.DIAGNOSIS_REPORT_USER_ID or slack_bot.slack_app is None:
-        return
-    slack_bot.slack_app.client.chat_postMessage(channel=config.DIAGNOSIS_REPORT_USER_ID, text=text)
-
-
-def run(doc_data: Dict, notify_owner: bool = False) -> List[Dict]:
-    """동기화가 끝난 문서를 진단해 저장하고, notify_owner면 발견한 것이 있을 때 담당자에게 알린다.
-    진단은 부가 기능이므로 실패해도 동기화 결과에는 영향을 주지 않는다."""
+def run(doc_data: Dict) -> List[Dict]:
+    """동기화가 끝난 문서를 진단해 저장한다. 진단은 부가 기능이므로 실패해도 동기화 결과에는 영향을 주지 않는다."""
     try:
         findings = diagnose(doc_data, search.get_documents())
         save(doc_data, findings)
         if findings:
             logger.info("📋 [문서 진단] '%s': %s", doc_data.get("title"), ", ".join(KINDS[f["kind"]] for f in findings))
-            if notify_owner:
-                notify(format_report(doc_data, findings))
         return findings
     except Exception:
         logger.exception("🚨 [문서 진단] 실패 (page_id: %s)", doc_data.get("page_id"))

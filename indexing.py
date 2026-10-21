@@ -119,14 +119,14 @@ def _page_lock(page_id: str) -> threading.Lock:
     with _page_locks_guard:
         return _page_locks.setdefault(page_id, threading.Lock())
 
-def sync_document_to_db(page_id: str, notion_token: str, notify: bool = False, requested_by: str = None):
+def sync_document_to_db(page_id: str, notion_token: str, requested_by: str = None):
     """노션 문서를 파싱해 청크로 나눠 Qdrant에 저장. 휴지통 문서는 저장하지 않고 인덱스에서 제거한다.
-    저장한 뒤 문서 진단을 남기고, notify면(웹훅 동기화) 진단할 것이 있을 때 담당자에게 알린다.
-    사서 작업 목록에도 올려 정리본을 새로 만들게 한다. requested_by('완료'한 사람의 노션 ID)가 있으면 사서가 검토까지 한다."""
+    저장한 뒤 문서 진단을 남기고, 사서 작업 목록에 올려 정리본을 새로 만들게 한다.
+    requested_by('완료'한 사람의 노션 ID)가 있으면 사서가 검토까지 해서 그 사람에게 제안을 보낸다."""
     with _page_lock(page_id):
-        return _sync_document(page_id, notion_token, notify, requested_by)
+        return _sync_document(page_id, notion_token, requested_by)
 
-def _sync_document(page_id: str, notion_token: str, notify: bool = False, requested_by: str = None):
+def _sync_document(page_id: str, notion_token: str, requested_by: str = None):
     doc_data = notion_parser.parse_notion_page_deep(page_id, notion_token)
 
     if doc_data and doc_data.get("trashed"):
@@ -195,7 +195,7 @@ def _sync_document(page_id: str, notion_token: str, notify: bool = False, reques
     search.invalidate_name_catalog()
 
     logger.info("🎉 [동기화 완료] '%s' (%d개 청크 저장)", title, len(points))
-    doc_diagnosis.run(doc_data, notify_owner=notify)
+    doc_diagnosis.run(doc_data)
     try:
         librarian.enqueue(page_id, requested_by)
     except Exception as e:

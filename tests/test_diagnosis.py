@@ -72,23 +72,17 @@ def test_diagnose_reports_facts():
         "unshared_relation": (3, ["스킬 (3개)"]),
         "same_title": (1, ["영웅 목록 > 카일린"]),
     }
-    report = doc_diagnosis.format_report(doc(), findings)
-    assert report.startswith("📋 *문서 진단* : <https://notion/P1|전투 요소>")
-    assert "• 읽을 수 없는 DB 뷰 (1) : 리더 > Untitled" in report
 
 
 def test_clean_document_has_no_findings():
     assert doc_diagnosis.diagnose(doc(), {"전투 요소": {"page_ids": ["P1"], "items": [], "path": ""}}) == []
 
 
-def test_run_saves_latest_and_notifies_only_with_findings(local_db, monkeypatch):
-    sent = []
-    monkeypatch.setattr(doc_diagnosis, "notify", sent.append)
+def test_run_saves_latest_diagnosis(local_db, monkeypatch):
     monkeypatch.setattr(search, "get_documents", lambda: {})
-    doc_diagnosis.run(doc(page_id="11111111-1111-1111-1111-111111111111", full_text="# 전투 요소"), notify_owner=True)
-    doc_diagnosis.run(doc(page_id="22222222-2222-2222-2222-222222222222"), notify_owner=True)
-    doc_diagnosis.run(doc(page_id="33333333-3333-3333-3333-333333333333", full_text="# 전투 요소"), notify_owner=False)
-    assert len(sent) == 1 and "본문이 거의 없음" in sent[0]
+    doc_diagnosis.run(doc(page_id="11111111-1111-1111-1111-111111111111", full_text="# 전투 요소"))
+    doc_diagnosis.run(doc(page_id="22222222-2222-2222-2222-222222222222"))
+    doc_diagnosis.run(doc(page_id="33333333-3333-3333-3333-333333333333", full_text="# 전투 요소"))
     saved = {p.id: p.payload for p in local_db.scroll(config.DIAGNOSIS_COLLECTION, limit=10)[0]}
     assert len(saved) == 3
     assert saved["22222222-2222-2222-2222-222222222222"]["findings"] == []
@@ -115,3 +109,20 @@ def test_report_groups_by_kind():
     assert "- [카일린](u1) (영웅 목록): 리더, 파트너" in report
     # 진단 종류 순서(KINDS)대로 나온다
     assert report.index("DB 뷰") < report.index("비어 있는 제목")
+
+
+def test_unreadable_notice_lists_only_what_ai_cannot_read(local_db, monkeypatch):
+    """빈 본문/같은 제목은 사서 검토가 다루므로 빼고, AI가 볼 수 없는 부분만 고치는 방법과 함께 알린다"""
+    monkeypatch.setattr(search, "get_documents", lambda: {})
+    page_id = "44444444-4444-4444-4444-444444444444"
+    doc_diagnosis.run(doc(page_id=page_id, full_text="# 전투 요소", outline=[
+        ("linked_view", "리더 > Untitled"), ("unshared_link",), ("unshared_relation", "스킬", 3)]))
+    notice = doc_diagnosis.unreadable_notice(page_id)
+    assert notice.startswith("📎 *사서가 읽지 못한 부분*")
+    assert "• 읽을 수 없는 DB 뷰 (1) : 리더 > Untitled — 링크된 DB 뷰는 읽을 수 없어요" in notice
+    assert "읽을 수 없는 페이지 링크 (1)" in notice and "관계형 참조 (3)" in notice
+    assert "본문이 거의 없음" not in notice
+
+    doc_diagnosis.run(doc(page_id=page_id))
+    assert doc_diagnosis.unreadable_notice(page_id) == ""
+    assert doc_diagnosis.unreadable_notice("55555555-5555-5555-5555-555555555555") == ""

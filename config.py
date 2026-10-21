@@ -33,8 +33,9 @@ QA_LOG_COLLECTION = "qa_logs"
 QA_REPORT_USER_ID = os.environ.get("QA_REPORT_USER_ID")
 QA_REPORT_WEEKDAY = 0
 QA_REPORT_HOUR = 10
-# 문서 진단 결과 (문서마다 최신 하나, 벡터 없음). 웹훅 동기화에서 진단할 것이 있으면 이 슬랙 사용자에게 DM (기본: 질문 기록 요약 받는 사람)
+# 문서 진단 결과 (문서마다 최신 하나, 벡터 없음)
 DIAGNOSIS_COLLECTION = "doc_diagnoses"
+# '완료'한 사람을 슬랙에서 찾지 못했을 때 사서 제안을 대신 받는 사람 (기본: 질문 기록 요약 받는 사람)
 DIAGNOSIS_REPORT_USER_ID = os.environ.get("DIAGNOSIS_REPORT_USER_ID") or QA_REPORT_USER_ID
 # 사서(librarian.py)가 원본을 정리한 정리본과, 정리할 문서 작업 목록 (벡터 없음)
 REFINED_COLLECTION = "refined_docs"
