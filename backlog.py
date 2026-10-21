@@ -8,7 +8,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
-from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct
+from qdrant_client.models import Filter, FieldCondition, MatchAny, MatchValue, PointStruct
 import clients
 import config
 
@@ -20,6 +20,10 @@ OPEN, RESOLVED = "open", "resolved"
 # APPLIED/OBSOLETE는 문서가 갱신됐을 때 사서가 대조해 닫은 것: 문서 수정으로 해결됨 / 가리키던 부분이 바뀌어 무효
 HELD, REJECTED = "held", "rejected"
 APPLIED, OBSOLETE = "applied", "obsolete"
+# 보류는 '맞지만 지금은 못 함': 이 기간 동안 리마인더에서 쉬었다가 다시 묻는다. 그동안에도 답변 참고 문구와 문서 갱신 대조에는 남는다
+HOLD_DAYS = 14
+# 아직 결론이 나지 않은 상태 (답변 참고 문구, 문서 갱신 대조, 담당자 버튼 처리 대상)
+UNSETTLED = [OPEN, HELD]
 PROPOSAL = "proposal"
 # 제안 종류: 원본 문서의 결정 기록에 덧붙일 결정 / 새로 만들 문서
 DECISION, WRITING = "decision", "writing"
@@ -149,7 +153,7 @@ def notes_for_answer(query_vector: List[float], answer_page_ids: List[str]) -> L
     """답변에 덧붙일 미해결 백로그 참고 문구 (관련도 높은 순)"""
     hits = clients.get_qdrant().query_points(
         collection_name=config.BACKLOG_COLLECTION, query=query_vector, limit=10, with_payload=True,
-        query_filter=Filter(must=[FieldCondition(key="status", match=MatchValue(value=OPEN))]),
+        query_filter=Filter(must=[FieldCondition(key="status", match=MatchAny(any=UNSETTLED))]),
     ).points
     answer_pages = set(answer_page_ids)
     notes, shown = [], []
@@ -202,13 +206,13 @@ def resolve(backlog_id: str, user_id: str) -> str:
 
 
 def check_open(backlog_id: str, user_id: str) -> str:
-    """담당자가 처리할 수 있는 미해결 백로그인지: ok / already / not_assignee / not_found"""
+    """담당자가 처리할 수 있는 미해결(보류 포함) 백로그인지: ok / already / not_assignee / not_found"""
     record = get(backlog_id)
     if record is None:
         return "not_found"
     if record["assignee_id"] != user_id:
         return "not_assignee"
-    if record["status"] != OPEN:
+    if record["status"] not in UNSETTLED:
         return "already"
     return "ok"
 
@@ -289,16 +293,39 @@ def mark_reminded(records: List[Dict]) -> None:
 
 
 def open_for_page(page_id: str) -> List[Dict]:
-    """이 문서에 연결된 미해결 백로그 (사람이 등록한 것과 사서 제안 모두)"""
+    """이 문서에 연결된 미해결(보류 포함) 백로그 (사람이 등록한 것과 사서 제안 모두)"""
     points, offset, records = [], None, []
     while True:
         points, offset = clients.get_qdrant().scroll(
             collection_name=config.BACKLOG_COLLECTION, limit=256, offset=offset, with_payload=True,
             scroll_filter=Filter(must=[FieldCondition(key="page_ids", match=MatchValue(value=page_id)),
-                                       FieldCondition(key="status", match=MatchValue(value=OPEN))]))
+                                       FieldCondition(key="status", match=MatchAny(any=UNSETTLED))]))
         records += [p.payload for p in points]
         if offset is None:
-            return records
+            return sorted(records, key=lambda r: r["created_at"])
+
+
+def hold(backlog_id: str, user_id: str) -> str:
+    """보류: HOLD_DAYS 뒤 리마인더에 다시 나오도록 한다. 다시 물을 날짜(YYYY-MM-DD)를 돌려준다"""
+    until = datetime.now(KST) + timedelta(days=HOLD_DAYS)
+    update(backlog_id, status=HELD, held_by=user_id, held_until=until.isoformat())
+    return f"{until:%Y-%m-%d}"
+
+
+def reopen_expired_holds(now: Optional[datetime] = None) -> int:
+    """보류 기간이 끝난 제안을 다시 미해결로 돌린다 (리마인더 순환에 다시 들어간다). 기간 없이 보류된 예전 기록은 그대로 둔다"""
+    now = (now or datetime.now(KST)).isoformat()
+    points, offset, expired = [], None, []
+    while True:
+        points, offset = clients.get_qdrant().scroll(
+            collection_name=config.BACKLOG_COLLECTION, limit=256, offset=offset, with_payload=True,
+            scroll_filter=Filter(must=[FieldCondition(key="status", match=MatchValue(value=HELD))]))
+        expired += [p.id for p in points if p.payload.get("held_until") and p.payload["held_until"] <= now]
+        if offset is None:
+            break
+    if expired:
+        clients.get_qdrant().set_payload(collection_name=config.BACKLOG_COLLECTION, points=expired, payload={"status": OPEN})
+    return len(expired)
 
 
 def update(backlog_id: str, **fields) -> None:

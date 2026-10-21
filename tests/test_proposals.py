@@ -271,10 +271,32 @@ def test_only_assignee_can_act_and_only_once(store, notion_fakes):
     record, slack = add(), FakeSlack()
     proposal_slack.handle_approve(button_body(record, "proposal_approve", user="U2"), slack)
     assert "담당자만" in slack.ephemerals[0]["text"]
-    proposal_slack.handle_hold(button_body(record, "proposal_hold"), slack)
+    backlog.close(record["backlog_id"], "U1", backlog.REJECTED)
     proposal_slack.handle_approve(button_body(record, "proposal_approve"), slack)
     assert "이미 처리된" in slack.ephemerals[1]["text"]
     assert written == []
+
+
+def test_hold_rests_then_comes_back_and_can_still_be_approved(store, notion_fakes):
+    from datetime import datetime, timedelta
+    written, _ = notion_fakes
+    held, approved_later, slack = add(), add(), FakeSlack()
+    proposal_slack.handle_hold(button_body(held, "proposal_hold"), slack)
+    until = datetime.now(backlog.KST) + timedelta(days=backlog.HOLD_DAYS)
+    assert f"{until:%Y-%m-%d}부터 다시 물어볼게요" in slack.updates[-1]["blocks"][-1]["elements"][0]["text"]
+
+    # 보류 중에는 리마인더에서 빠지지만 답변 참고 문구에는 남는다
+    assert held["backlog_id"] not in [r["backlog_id"] for rs in backlog.open_by_assignee().values() for r in rs]
+    assert held["note"] in backlog.notes_for_answer(VECTOR, ["P1"])
+    # 기간이 끝나면 다시 미해결로 돌아온다
+    assert backlog.reopen_expired_holds(now=until - timedelta(days=1)) == 0
+    assert backlog.reopen_expired_holds(now=until + timedelta(minutes=1)) == 1
+    assert backlog.get(held["backlog_id"])["status"] == backlog.OPEN
+
+    # 보류 중이어도 담당자가 마음을 바꿔 통과할 수 있다
+    proposal_slack.handle_hold(button_body(approved_later, "proposal_hold"), slack)
+    proposal_slack.handle_approve(button_body(approved_later, "proposal_approve"), slack)
+    assert backlog.get(approved_later["backlog_id"])["status"] == backlog.RESOLVED and len(written) == 1
 
 
 def test_notion_failure_keeps_proposal_open(store, monkeypatch):

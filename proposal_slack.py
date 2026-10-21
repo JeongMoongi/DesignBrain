@@ -191,8 +191,9 @@ def handle_hold(body, client) -> None:
     user_id, channel_id, backlog_id = body["user"]["id"], body["channel"]["id"], body["actions"][0]["value"]
     if refuse(client, channel_id, user_id, backlog.check_open(backlog_id, user_id)):
         return
-    backlog.close(backlog_id, user_id, backlog.HELD)
-    update_item(client, channel_id, body["message"], backlog_id, "⏸️ 보류했어요. 같은 제안은 다시 보내지 않아요.")
+    until = backlog.hold(backlog_id, user_id)
+    update_item(client, channel_id, body["message"], backlog_id,
+                f"⏸️ 보류했어요. {until}부터 다시 물어볼게요. 그전에 처리하려면 리마인더나 이 메세지의 버튼을 쓰면 돼요.")
 
 
 def modal_metadata(body) -> str:

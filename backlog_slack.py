@@ -120,6 +120,9 @@ def reminder_messages(records, proposal_total=0):
     return messages
 
 def send_backlog_reminders(client):
+    reopened = backlog.reopen_expired_holds()
+    if reopened:
+        logger.info("⏰ [백로그] 보류 기간이 끝난 제안 %d건을 다시 묻습니다.", reopened)
     for assignee_id, all_records in backlog.open_by_assignee().items():
         try:
             records, proposal_total = backlog.reminder_selection(all_records)
