@@ -48,6 +48,7 @@ def main(args):
             f.write(report)
         print(f"저장: {os.path.abspath(opts.out)}")
     else:
+        sys.stdout.reconfigure(encoding="utf-8")  # Windows 콘솔(cp949)은 '—' 등을 출력하지 못한다
         print(report)
     return 0
 
