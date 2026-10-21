@@ -249,6 +249,18 @@ def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, 
     return record
 
 
+def update(backlog_id: str, **fields) -> None:
+    clients.get_qdrant().set_payload(collection_name=config.BACKLOG_COLLECTION, points=[backlog_id], payload=fields)
+
+
+def proposal_by_chat(chat_ts: str) -> Optional[Dict]:
+    """'대화로 고치기' 스레드(첫 메세지 ts)에 연결된 제안"""
+    points = clients.get_qdrant().scroll(
+        collection_name=config.BACKLOG_COLLECTION, limit=1, with_payload=True,
+        scroll_filter=Filter(must=[FieldCondition(key="chat_ts", match=MatchValue(value=chat_ts))]))[0]
+    return points[0].payload if points else None
+
+
 def proposals_for_page(page_id: str) -> List[Dict]:
     """이 문서에 대해 사서가 냈던 제안 전부 (상태 무관, 오래된 순). 같은 제안을 다시 내지 않도록 검토에 넘긴다"""
     records, offset = [], None

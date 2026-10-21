@@ -62,6 +62,9 @@ def init_slack():
             say = slack_service.thread_say(client, channel_id)
 
             logger.info("💬 [DM 수신] 유저(%s): %s", user_id, user_text)
+            # 사서 제안을 대화로 고치는 스레드의 메세지는 질문이 아니라 고칠 지시다
+            if proposal_slack.handle_chat_message(client, event):
+                return
             request_text = backlog_slack.backlog_request_text(user_text)
             if request_text is not None:
                 backlog_slack.handle_backlog_mention(client, say, event, request_text)
@@ -96,6 +99,11 @@ def init_slack():
     def handle_proposal_edit(ack, body, client):
         ack()
         proposal_slack.handle_edit(body, client)
+
+    @slack_app.action("proposal_chat")
+    def handle_proposal_chat(ack, body, client):
+        ack()
+        proposal_slack.handle_chat(body, client)
 
     @slack_app.action("proposal_hold")
     def handle_proposal_hold(ack, body, client):

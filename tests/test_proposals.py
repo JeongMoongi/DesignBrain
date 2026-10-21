@@ -295,3 +295,56 @@ def test_reminders_show_proposal_buttons_within_block_limit(store):
     assert sum(1 for blocks in messages for b in blocks if b["type"] == "actions") == 20
     actions = next(b for b in messages[0] if b["type"] == "actions")
     assert actions["elements"][0]["action_id"] == "proposal_approve"
+
+
+# --- 대화로 고치기 ---
+def chat_event(text, thread_ts, user="U1"):
+    return {"channel": "D1", "user": user, "text": text, "thread_ts": thread_ts, "ts": "9.0"}
+
+
+def test_chat_opens_own_thread_and_revises_proposal(store, notion_fakes, monkeypatch):
+    written, _ = notion_fakes
+    record, slack = add(WRITING), FakeSlack()
+    proposal_slack.handle_chat(button_body(record, "proposal_chat"), slack)
+    head, current = slack.posts
+    # 가짜 슬랙은 n번째 메세지의 ts를 'n.0'으로 준다
+    assert head["text"].startswith("💬 *작성이 필요함: 챕터 1 적 총정리*") and current["thread_ts"] == "1.0"
+    assert "대화 스레드에서" in slack.updates[0]["blocks"][-1]["elements"][0]["text"]
+
+    calls = []
+    monkeypatch.setattr(proposal_slack, "revise", lambda rec, message: calls.append((rec["proposal"], message)) or
+                        {"reply": "보스를 뺐어요.", "proposal": "## 일반몹\n- 석화체", "assumptions": ""})
+    assert proposal_slack.handle_chat_message(slack, chat_event("보스는 빼 줘", "1.0")) is True
+    assert calls == [(WRITING["proposal"], "보스는 빼 줘")]
+    saved = backlog.get(record["backlog_id"])
+    assert saved["proposal"] == "## 일반몹\n- 석화체"
+    assert saved["chat_history"] == [{"role": "기획자", "text": "보스는 빼 줘"}, {"role": "사서", "text": "보스를 뺐어요."}]
+    revised = slack.updates[-1]["blocks"]
+    assert revised[0]["text"]["text"] == "✏️ 보스를 뺐어요." and revised[-1]["type"] == "actions"
+
+    # 고친 내용으로 통과된다
+    proposal_slack.handle_approve(button_body(saved, "proposal_approve"), slack)
+    assert written[0][2] == "## 일반몹\n- 석화체"
+
+
+def test_chat_question_keeps_proposal(store, monkeypatch):
+    record, slack = add(), FakeSlack()
+    proposal_slack.handle_chat(button_body(record, "proposal_chat"), slack)
+    monkeypatch.setattr(proposal_slack, "revise", lambda rec, message: {"reply": "근거는 전투 요소예요.", "proposal": "", "assumptions": ""})
+    proposal_slack.handle_chat_message(slack, chat_event("근거가 뭐야?", "1.0"))
+    assert backlog.get(record["backlog_id"])["proposal"] == DECISION["proposal"]
+    assert slack.updates[-1]["text"] == "💬 근거는 전투 요소예요."
+
+
+def test_other_dm_messages_are_not_chat(store):
+    slack = FakeSlack()
+    assert proposal_slack.handle_chat_message(slack, {"channel": "D1", "user": "U1", "text": "질문", "ts": "1.0"}) is False
+    assert proposal_slack.handle_chat_message(slack, chat_event("질문", "777.0")) is False
+
+
+def test_chat_on_closed_proposal_says_so(store):
+    record, slack = add(), FakeSlack()
+    proposal_slack.handle_chat(button_body(record, "proposal_chat"), slack)
+    backlog.close(record["backlog_id"], "U1", backlog.HELD)
+    assert proposal_slack.handle_chat_message(slack, chat_event("고쳐 줘", "1.0")) is True
+    assert slack.posts[-1]["text"] == "이미 처리된 제안이에요."

@@ -52,7 +52,7 @@ def _connect_qdrant() -> QdrantClient:
     # Qdrant Cloud는 필터에 쓰는 필드에 인덱스가 필요하다
     text_vectors = VectorParams(size=config.EMBEDDING_DIM, distance=Distance.COSINE)
     for collection, vectors, indexed_fields in ((config.COLLECTION_NAME, text_vectors, ["page_id", "item"]),
-                                                (config.BACKLOG_COLLECTION, text_vectors, ["status", "assignee_id", "page_ids"]),
+                                                (config.BACKLOG_COLLECTION, text_vectors, ["status", "assignee_id", "page_ids", "chat_ts"]),
                                                 # 질문 기록은 검색하지 않으므로 벡터 없이 저장한다
                                                 (config.QA_LOG_COLLECTION, {}, ["answer_ts"]),
                                                 (config.DIAGNOSIS_COLLECTION, {}, []),

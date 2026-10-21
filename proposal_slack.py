@@ -96,6 +96,8 @@ def item_blocks(record: Dict) -> List[Dict]:
              "text": {"type": "plain_text", "text": "✅ 이대로 통과"}},
             {"type": "button", "action_id": "proposal_edit", "value": record["backlog_id"],
              "text": {"type": "plain_text", "text": "✏️ 고쳐서 통과"}},
+            {"type": "button", "action_id": "proposal_chat", "value": record["backlog_id"],
+             "text": {"type": "plain_text", "text": "💬 대화로 고치기"}},
             {"type": "button", "action_id": "proposal_hold", "value": record["backlog_id"],
              "text": {"type": "plain_text", "text": "⏸️ 보류"}},
             {"type": "button", "action_id": "proposal_reject", "style": "danger", "value": record["backlog_id"],
@@ -253,3 +255,82 @@ def handle_reject_submit(body, client) -> None:
     backlog.close(meta["backlog_id"], user_id, backlog.REJECTED, reject_reason=reason)
     update_item(client, meta["channel"], find_message(client, meta), meta["backlog_id"],
                 "❌ 반려했어요." + (f" (사유: {reason})" if reason else ""))
+
+
+# --- [대화로 고치기] ---
+# 슬랙 스레드는 한 단계뿐이라, 제안 여러 건이 있는 스레드에서는 답장이 어느 제안에 대한 것인지 알 수 없다.
+# 그래서 버튼을 누르면 그 제안만의 새 스레드를 열고, 그 스레드의 메세지를 사서가 고칠 지시로 받는다.
+REVISE_PROMPT = (
+    "너는 게임 기획팀의 기획서 정리 담당 '사서'다. 네가 낸 [제안]을 담당 기획자가 대화로 함께 고치고 있다. "
+    "[기획자의 말]에 따라 제안을 고쳐라. 확인이 필요하면 도구로 기획서를 찾아 읽어라.\n"
+    "- 제안의 형식(결정 기록에 붙일 결정 / 지도 문서 초안)과 출처 표기 '(참고: 문서 이름)'는 유지한다.\n"
+    "- 기획자가 정한 내용은 그대로 따른다. 기획서와 다르면 고치되 reply에서 짧게 알린다.\n"
+    "- 기획자의 말이 질문이면 답만 하고 제안은 바꾸지 않는다.\n"
+    "JSON만 출력한다: {\"reply\": \"기획자에게 할 말 (무엇을 바꿨는지 또는 질문에 대한 답) 2문장 이내\", "
+    "\"proposal\": \"고친 제안 전체 (바꾸지 않았으면 빈 문자열)\", \"assumptions\": \"근거 없이 정한 부분 요약 (없으면 빈 문자열)\"}"
+)
+# 사서에게 함께 넘기는 이 스레드의 이전 대화 수
+CHAT_HISTORY_TURNS = 10
+
+
+def handle_chat(body, client) -> None:
+    """대화로 고치기: 그 제안만의 새 스레드를 열고 지금 제안을 보여준다"""
+    user_id, channel_id, backlog_id = body["user"]["id"], body["channel"]["id"], body["actions"][0]["value"]
+    if refuse(client, channel_id, user_id, backlog.check_open(backlog_id, user_id)):
+        return
+    record = backlog.get(backlog_id)
+    if record.get("chat_ts"):
+        client.chat_postEphemeral(channel=channel_id, user=user_id, text="이미 이 제안의 대화 스레드가 있어요. 그 스레드에서 이어서 말해 주세요.")
+        return
+    head = client.chat_postMessage(channel=channel_id, text=(
+        f"💬 *{record['content']}* 을(를) 대화로 고쳐요.\n"
+        "이 스레드에 고칠 점을 말해 주세요. (예: '보스 부분은 빼 줘', '디고리 내용이 맞는지 다시 확인해 줘')\n"
+        "마음에 들면 스레드의 마지막 [✅ 이대로 통과]를 눌러 주세요."))
+    client.chat_postMessage(channel=channel_id, thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
+    backlog.update(backlog_id, chat_ts=head["ts"], chat_history=[])
+    update_item(client, channel_id, body["message"], backlog_id, "💬 대화 스레드에서 고치는 중이에요.")
+
+
+def revise(record: Dict, message: str) -> Dict:
+    """사서가 기획자의 말에 따라 제안을 고친다. {"reply", "proposal", "assumptions"}"""
+    import review
+    history = "\n".join(f"{h['role']}: {h['text']}" for h in record.get("chat_history", [])[-CHAT_HISTORY_TURNS:]) or "(없음)"
+    request = (f"[제안] {record['content']}\n[문제] {record.get('problem', '')}\n[지금 제안 내용]\n{record['proposal']}\n\n"
+               f"[이 스레드의 이전 대화]\n{history}\n\n[기획자의 말]\n{message}")
+    data = review.parse_json(review.run_with_tools(REVISE_PROMPT, request, f"'{record['content']}' 대화로 고치기"))
+    return {"reply": data.get("reply") or "고쳐 봤어요.", "proposal": (data.get("proposal") or "").strip(),
+            "assumptions": data.get("assumptions", "")}
+
+
+def handle_chat_message(client, event) -> bool:
+    """DM 스레드 메세지가 '대화로 고치기' 스레드의 것이면 처리하고 True. 아니면 False (일반 질문으로 처리)"""
+    thread_ts = event.get("thread_ts")
+    if not thread_ts:
+        return False
+    record = backlog.proposal_by_chat(thread_ts)
+    if record is None:
+        return False
+    channel_id, user_id = event["channel"], event.get("user")
+    if record["status"] != backlog.OPEN or record["assignee_id"] != user_id:
+        client.chat_postMessage(channel=channel_id, thread_ts=thread_ts,
+                                text="이미 처리된 제안이에요." if record["status"] != backlog.OPEN else "담당자만 고칠 수 있어요.")
+        return True
+    placeholder = client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text="🧹 사서가 고치는 중…")
+    try:
+        result = revise(record, event.get("text", ""))
+    except Exception as e:
+        logger.exception("🚨 [사서] 대화로 고치기 실패: %s", record["content"])
+        client.chat_update(channel=channel_id, ts=placeholder["ts"], text=f"❌ 고치지 못했어요. 다시 말해 주세요. ({type(e).__name__})")
+        return True
+    history = record.get("chat_history", []) + [{"role": "기획자", "text": event.get("text", "")}, {"role": "사서", "text": result["reply"]}]
+    fields = {"chat_history": history}
+    if result["proposal"]:
+        fields.update(proposal=result["proposal"], assumptions=result["assumptions"])
+    backlog.update(record["backlog_id"], **fields)
+    record.update(fields)
+    if result["proposal"]:
+        client.chat_update(channel=channel_id, ts=placeholder["ts"], text=result["reply"],
+                           blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"✏️ {result['reply']}"}}] + item_blocks(record))
+    else:
+        client.chat_update(channel=channel_id, ts=placeholder["ts"], text=f"💬 {result['reply']}")
+    return True
