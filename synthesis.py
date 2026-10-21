@@ -14,16 +14,22 @@ logger = logging.getLogger(__name__)
 SYNTHESIS_PROMPT = (
     "너는 게임 기획팀의 기획서 정리 담당 '사서'다. 팀의 AI 동료 @Brain이 기획자의 질문에 답하다가, "
     "필요한 정보가 한 문서에 정리돼 있지 않고 여러 기획서에 흩어져 있다며 [요청 주제]의 종합 문서를 요청했다. "
-    "도구로 관련 기획서를 빠짐없이 찾아 읽고, 흩어진 정보를 한 문서로 모은 초안을 써라. 기획자가 검토해 승인하면 노션에 새 문서로 등록된다.\n\n"
+    "도구로 관련 기획서를 빠짐없이 찾아 읽고, 흩어진 정보를 찾아갈 수 있게 하는 '지도' 문서 초안을 써라. "
+    "기획자가 검토해 승인하면 노션에 새 문서로 등록된다.\n\n"
+    "[지도 문서란]\n"
+    "- 무엇이 있는지(빠짐없는 목록), 어떻게 나뉘는지(분류), 자세한 내용은 어느 문서에 있는지만 담는다.\n"
+    "- 항목마다 한 줄: '이름 — 분류와 그것을 알아볼 수 있는 핵심 특징 한 구절 (참고: 문서 이름)'.\n"
+    "- 수치, 패턴, 규칙 같은 상세 내용은 옮기지 마라. 상세는 원본 문서가 맡는다 (원본이 바뀌어도 지도가 낡지 않도록).\n\n"
     "[반드시 지킬 것]\n"
-    "- 기획서에 있는 내용만 모은다. 이름, 수치, 조건은 원문 그대로 쓴다. 근거 없는 내용을 더하지 마라.\n"
-    "- 각 내용 끝에 출처를 '(참고: 문서 이름)'으로 단다. 문서 이름은 도구 결과에 나온 이름 그대로 쓴다.\n"
-    "- 문서끼리 내용이 어긋나면 한쪽을 고르지 말고 양쪽을 모두 적고 '문서 간 차이'라고 표시한다.\n"
-    "- 폐기·Legacy·미정으로 적힌 내용도 빼지 말고 그렇게 표시해서 남긴다.\n"
-    "- 요청 주제를 이해하는 데 필요한 범위까지만 모은다. 관련 없는 내용으로 넓히지 마라.\n\n"
+    "- 기획서에 있는 내용만 쓴다. 이름은 원문 그대로 쓴다. 근거 없는 내용을 더하지 마라.\n"
+    "- 모든 항목 끝에 출처를 '(참고: 문서 이름)'으로 단다. 문서 이름은 도구 결과에 나온 이름 그대로 쓴다.\n"
+    "- 문서끼리 어긋나면 한쪽을 고르지 말고 양쪽을 모두 적고 '문서 간 차이'라고 표시한다.\n"
+    "- 폐기·Legacy·미정으로 적힌 것도 빼지 말고 그렇게 표시해서 남긴다.\n"
+    "- 전용 기획서가 없는 항목은 '전용 기획서 없음'이라고 쓴다.\n"
+    "- 요청 주제의 범위까지만 담는다.\n\n"
     "[출력]\n"
     "JSON만 출력한다: {\"new_doc_title\": \"새 문서 제목\", \"problem\": \"왜 이 문서가 필요한지 (어떤 정보가 어느 문서들에 흩어져 있는지) 2문장 이내\", "
-    "\"proposal\": \"문서 초안 전체. '## 소제목'과 '- 목록'으로 쓰고 2500자 이내\", "
+    "\"proposal\": \"지도 문서 초안 전체. '## 분류'와 '- 항목' 한 줄씩, 1500자 이내\", "
     "\"assumptions\": \"초안에서 근거 없이 정한 부분 요약 (없으면 빈 문자열)\", \"related_docs\": [\"근거로 읽은 문서 이름\"]}\n"
     "모을 정보가 실제로는 한 문서에 이미 정리돼 있으면 {\"skip\": \"이유\"}만 출력한다."
 )
@@ -65,18 +71,80 @@ def draft(job: Dict) -> Optional[Dict]:
             "related_docs": data.get("related_docs", [])}
 
 
+UPDATE_PROMPT = (
+    "너는 게임 기획팀의 기획서 정리 담당 '사서'다. [지도 문서]는 여러 원본 기획서를 모아 만든 지도로, "
+    "무엇이 있는지·어떻게 나뉘는지·상세는 어느 문서에 있는지만 담는다. 원본 중 [바뀐 문서]가 방금 갱신됐다.\n"
+    "지도의 항목(목록, 분류, 한 줄 특징, 출처)이 바뀐 문서와 어긋나거나, 바뀐 문서에 새로 생겨 지도에 빠진 항목이 있는지 확인하라. "
+    "지도에 없는 상세(수치, 패턴)의 변경은 무시한다. [이미 낸 제안]과 같은 것은 다시 내지 마라.\n"
+    "고칠 것이 있으면 JSON만 출력한다: {\"needs_update\": true, \"title\": \"결정이 필요함: …\", "
+    "\"problem\": \"무엇이 어긋나는지 원문 인용, 2문장 이내\", \"proposal\": \"지도에 반영할 항목 줄만 지도 형식으로 (참고: 문서 이름) 포함\", "
+    "\"assumptions\": \"\"}\n"
+    "고칠 것이 없으면 {\"needs_update\": false}만 출력한다."
+)
+
+
+def summaries_built_from(page_id: str) -> List[Dict]:
+    """이 원본으로 만들어져 승인된 지도(종합) 문서 제안들"""
+    records, offset = [], None
+    while True:
+        points, offset = clients.get_qdrant().scroll(collection_name=config.BACKLOG_COLLECTION, limit=256, offset=offset,
+                                                     with_payload=True)
+        records += [p.payload for p in points
+                    if p.payload.get("proposal_type") == backlog.WRITING and p.payload.get("status") == backlog.RESOLVED
+                    and p.payload.get("notion_page_id")
+                    and page_id in (p.payload.get("source_page_ids") or [d["page_id"] for d in p.payload.get("docs", [])])]
+        if offset is None:
+            return records
+
+
+def check_dependents(page_id: str) -> List[Dict]:
+    """원본이 바뀌었을 때, 그 원본으로 만든 지도 문서에 반영할 것이 있으면 지도를 승인한 사람에게 갱신 제안을 보낸다.
+    갱신은 지도 문서의 결정 기록에 덧붙는 결정 제안이다 (정리할 때 결정 기록이 본문보다 우선한다). 보낸 제안을 돌려준다."""
+    import proposal_slack
+    sent = []
+    for summary in summaries_built_from(page_id):
+        summary_page = summary["notion_page_id"]
+        summary_text, source_text = review.refined_text(summary_page), review.refined_text(page_id)
+        if not summary_text or not source_text:
+            continue
+        response = clients.get_openai().responses.create(
+            model=config.REFINE_MODEL, instructions=UPDATE_PROMPT, reasoning={"effort": config.REFINE_REASONING_EFFORT},
+            input=f"[지도 문서] {summary['new_doc_title']}\n{summary_text}\n\n[바뀐 문서]\n{source_text}\n\n"
+                  f"[이미 낸 제안]\n{review.earlier_proposals(summary_page)}")
+        data = review.parse_json(response.output_text or "")
+        if not data.get("needs_update") or not data.get("title") or not data.get("proposal"):
+            continue
+        target = {"page_id": summary_page, "title": summary["new_doc_title"], "url": summary.get("notion_url", "")}
+        source = next(iter(backlog.linked_docs([page_id])), None)
+        finding = {"type": backlog.DECISION, "title": data["title"], "problem": data.get("problem", ""),
+                   "proposal": data["proposal"], "assumptions": data.get("assumptions", "")}
+        slack = proposal_slack.web_client()
+        assignee_id = summary.get("resolved_by") or config.DIAGNOSIS_REPORT_USER_ID
+        assignee_name = proposal_slack.user_name(slack, assignee_id) if slack and assignee_id else None
+        record = backlog.add_proposal(finding, target, [source] if source else [], assignee_id, assignee_name,
+                                      review_id=f"summary-update:{page_id}")
+        if slack:
+            changed = f"<{source['url']}|{source['title']}>" if source else "원본 문서"
+            intro = (f"🗺️ {changed} 이(가) 바뀌어, 그 문서로 만든 지도 <{target['url']}|{target['title']}> 에 반영할 내용이 있어요.\n"
+                     "통과하면 지도 문서의 결정 기록에 추가돼요.")
+            proposal_slack.send_review(slack, assignee_id, target, [record], intro=intro)
+        logger.info("🗺️ [사서] '%s' 변경으로 지도 '%s' 갱신 제안", page_id, summary["new_doc_title"])
+        sent.append(record)
+    return sent
+
+
 def page_creator(page_id: str) -> Optional[str]:
     """노션 페이지를 만든 사람의 노션 ID"""
     page = notion_parser.fetch_page(page_id, config.NOTION_INTEGRATION_TOKEN)
     return (page or {}).get("created_by", {}).get("id")
 
 
-def handle_request(job: Dict) -> Optional[Dict]:
+def handle_request(job: Dict, check_existing: bool = True) -> Optional[Dict]:
     """종합 요청 하나를 처리한다: 비슷한 제안이 있으면 건너뛰고, 아니면 초안을 써서 관련 원본 문서를 만든 사람에게 보낸다.
-    저장한 제안을 돌려준다."""
+    저장한 제안을 돌려준다. check_existing=False면 이미 낸 제안이 있어도 다시 만든다 (형식을 바꿔 다시 낼 때)."""
     import proposal_slack
     topic = job["topic"]
-    existing = similar_proposal(topic, clients.get_embedding(topic))
+    existing = similar_proposal(topic, clients.get_embedding(topic)) if check_existing else None
     if existing:
         logger.info("📚 [사서 종합] '%s'은(는) 이미 낸 제안 '%s'(%s)과 비슷해 건너뜁니다.", topic, existing["content"], existing["status"])
         return None

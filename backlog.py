@@ -237,6 +237,8 @@ def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, 
         "assignee_name": assignee_name,
         "page_ids": [target["page_id"]],
         "docs": [target] + [d for d in related if d["page_id"] != target["page_id"]],
+        # 근거 문서 전부. 승인된 지도(종합) 문서는 이 원본들이 바뀌면 갱신을 검토한다 (synthesis.check_dependents)
+        "source_page_ids": list(dict.fromkeys([target["page_id"]] + [d["page_id"] for d in related])),
         "status": OPEN,
         "created_at": datetime.now(KST).isoformat(),
         "source": {"review_id": review_id},

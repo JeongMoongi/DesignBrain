@@ -102,3 +102,65 @@ def test_unknown_creator_goes_to_fallback_user(librarian_fakes, monkeypatch):
     record = synthesis.handle_request({"topic": "챕터 1 적 구성", "doc_names": []})
     assert record["assignee_id"] == "UADMIN"
     assert "찾지 못해" in slack.posts[0]["text"]
+
+
+# --- 원본이 바뀌면 지도 갱신 제안 ---
+class FakeResponsesAPI:
+    def __init__(self, text):
+        self.text, self.requests = text, []
+
+    def create(self, **kwargs):
+        self.requests.append(kwargs)
+        return type("Response", (), {"output_text": self.text})()
+
+
+@pytest.fixture
+def approved_map(store, monkeypatch):
+    """P1·P2로 만든 지도 S1이 승인되어 있고, 정리본이 있는 상태"""
+    from qdrant_client.models import PointStruct
+    record = backlog.add_proposal({"type": "writing", "title": "작성이 필요함: 챕터 1 적 구성", "proposal": "- 석화체",
+                                   "new_doc_title": "챕터 1 적 구성"}, DOCS[0], DOCS[1:], "UAUTHOR", "작성자", "r")
+    backlog.close(record["backlog_id"], "UAPPROVER", backlog.RESOLVED, notion_page_id="S1", notion_url="https://notion/S1")
+    store.upsert(config.REFINED_COLLECTION, [
+        PointStruct(id=i, vector=VECTOR, payload={"page_id": pid, "chunk_idx": 0, "text": f"문서: x\n{text}", "title": pid})
+        for i, (pid, text) in enumerate([("S1", "- 석화체 — 슈퍼아머 (참고: 챕터 1 몹)"), ("P1", "## 항목: 석화체\n- 유형: 잡몹")], 1)])
+    slack = FakeSlack()
+    monkeypatch.setattr(proposal_slack, "web_client", lambda: slack)
+    monkeypatch.setattr(backlog, "linked_docs", lambda page_ids: [d for d in DOCS if d["page_id"] in page_ids])
+    return slack
+
+
+def install_responses(monkeypatch, payload):
+    fake = FakeResponsesAPI(json.dumps(payload, ensure_ascii=False))
+    monkeypatch.setattr(clients, "get_openai", lambda: type("OpenAI", (), {"responses": fake})())
+    return fake
+
+
+def test_changed_source_sends_map_update_to_approver(approved_map, monkeypatch):
+    slack = approved_map
+    fake = install_responses(monkeypatch, {"needs_update": True, "title": "결정이 필요함: 석화체 분류 변경 반영",
+                                           "problem": "잡몹으로 바뀜", "proposal": "- 석화체 — 잡몹 (참고: 챕터 1 몹)"})
+    sent = synthesis.check_dependents("P1")
+    assert "[지도 문서] 챕터 1 적 구성\n- 석화체 — 슈퍼아머" in fake.requests[0]["input"]
+    assert "[바뀐 문서]\n## 항목: 석화체" in fake.requests[0]["input"]
+    record, = sent
+    assert (record["proposal_type"], record["page_ids"], record["assignee_id"]) == (backlog.DECISION, ["S1"], "UAPPROVER")
+    assert slack.posts[0]["channel"] == "UAPPROVER" and slack.posts[0]["text"].startswith("🗺️ <https://notion/P1|챕터 1 몹>")
+    # 지도의 근거가 아닌 문서가 바뀌면 아무것도 하지 않는다
+    assert synthesis.check_dependents("P9") == []
+
+
+def test_unchanged_map_sends_nothing(approved_map, monkeypatch):
+    install_responses(monkeypatch, {"needs_update": False})
+    assert synthesis.check_dependents("P2") == []
+    assert approved_map.posts == []
+
+
+def test_only_changed_originals_trigger_map_check(store, monkeypatch):
+    checked = []
+    monkeypatch.setattr(synthesis, "check_dependents", checked.append)
+    for changed in (3, None):
+        monkeypatch.setattr(librarian, "refine_document", lambda page_id, changed=changed: changed)
+        librarian.enqueue("P1")
+        librarian.process_jobs()
+    assert checked == ["P1"]

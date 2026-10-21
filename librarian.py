@@ -300,7 +300,9 @@ def process_jobs() -> int:
             if job.get("kind") == SYNTHESIS:
                 synthesis.handle_request(job)
             else:
-                refine_document(job["page_id"])
+                # 원본 내용이 바뀌었으면 그 원본으로 만든 지도 문서에 반영할 것이 있는지 본다
+                if refine_document(job["page_id"]):
+                    synthesis.check_dependents(job["page_id"])
                 if job.get("requested_by"):
                     review_and_notify(job["page_id"], job["requested_by"])
             finish_job(job, failed=False)
