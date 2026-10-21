@@ -209,7 +209,7 @@ def app_client(monkeypatch):
     monkeypatch.setattr(slack_bot, "stop_slack_bot", lambda: None)
     monkeypatch.setattr(clients, "get_qdrant", lambda: None)
     monkeypatch.setattr(clients, "close_clients", lambda: None)
-    monkeypatch.setattr(indexing, "sync_document_to_db", lambda pid, tok, notify=False: calls.append(("sync", pid, notify)))
+    monkeypatch.setattr(indexing, "sync_document_to_db", lambda pid, tok, notify=False, requested_by=None: calls.append(("sync", pid, notify, requested_by)))
     monkeypatch.setattr(indexing, "delete_document_from_db", lambda pid: calls.append(("delete", pid)))
     with TestClient(main.app) as client:
         yield client, calls
@@ -230,4 +230,12 @@ def test_webhook_accepts_correct_secret(app_client, monkeypatch):
     headers = {"X-Webhook-Secret": "s3cr3t"}
     assert client.post("/webhook/notion", json={"data": {"id": "p1"}}, headers=headers).status_code == 200
     assert client.post("/webhook/notion/delete", json={"source": {"id": "p2"}}, headers=headers).status_code == 200
-    assert calls == [("sync", "p1", True), ("delete", "p2")]
+    assert calls == [("sync", "p1", True, None), ("delete", "p2")]
+
+
+def test_webhook_passes_who_pressed_the_button(app_client, monkeypatch):
+    client, calls = app_client
+    monkeypatch.setattr(config, "NOTION_WEBHOOK_SECRET", None)
+    client.post("/webhook/notion", json={"source": {"user_id": "u-src"}, "data": {"id": "p1", "last_edited_by": {"id": "u-edit"}}})
+    client.post("/webhook/notion", json={"data": {"id": "p2", "last_edited_by": {"id": "u-edit"}}})
+    assert calls == [("sync", "p1", True, "u-src"), ("sync", "p2", True, "u-edit")]

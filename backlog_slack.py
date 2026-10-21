@@ -72,11 +72,15 @@ def handle_backlog_mention(client, say, event, request_text):
             logger.warning("⚠️ [백로그] 스레드에서 연결 기획서를 찾지 못했습니다: %s", e)
     register_backlog(client, say, request_text, event.get("user"), reply_ts, docs=docs)
 
-# 리마인더 DM 한 통에 담는 백로그 수 (슬랙 메세지는 블록 50개 제한, 항목당 블록 2개)
+# 리마인더 DM 한 통에 담는 백로그 수와 블록 수 (슬랙 메세지는 블록 50개 제한, 항목당 블록 2개, 수집가 제안은 3개)
 REMINDER_ITEMS_PER_MESSAGE = 20
+MAX_BLOCKS_PER_MESSAGE = 50
 reminder_stop = threading.Event()
 
 def reminder_item_blocks(record):
+    if record.get("kind") == backlog.PROPOSAL:
+        import proposal_slack
+        return proposal_slack.item_blocks(record)
     details = [f"등록: {record.get('reporter_name') or '팀원'} · {record['created_at'][:10]}"]
     if record.get("docs"):
         details.append(f"관련 기획서: {doc_links(record['docs'])}")
@@ -91,17 +95,17 @@ def reminder_item_blocks(record):
     ]
 
 def reminder_messages(records):
-    """담당자 한 명에게 보낼 DM 메세지들 (블록 목록의 목록)"""
-    messages = []
-    for start in range(0, len(records), REMINDER_ITEMS_PER_MESSAGE):
-        part = records[start:start + REMINDER_ITEMS_PER_MESSAGE]
-        blocks = []
-        if start == 0:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                f"📋 아직 해결되지 않은 백로그가 *{len(records)}건* 있어요. 기획서에 반영됐다면 [✅ 해결됨]을 눌러 주세요."}})
-        for record in part:
-            blocks.extend(reminder_item_blocks(record))
-        messages.append(blocks)
+    """담당자 한 명에게 보낼 DM 메세지들 (블록 목록의 목록). 메세지마다 항목 수와 블록 수 제한을 지킨다"""
+    messages = [[{"type": "section", "text": {"type": "mrkdwn", "text":
+        f"📋 아직 해결되지 않은 백로그가 *{len(records)}건* 있어요. 기획서에 반영됐다면 [✅ 해결됨]을 눌러 주세요."}}]]
+    items_in_message = 0
+    for record in records:
+        blocks = reminder_item_blocks(record)
+        if items_in_message >= REMINDER_ITEMS_PER_MESSAGE or len(messages[-1]) + len(blocks) > MAX_BLOCKS_PER_MESSAGE:
+            messages.append([])
+            items_in_message = 0
+        messages[-1].extend(blocks)
+        items_in_message += 1
     return messages
 
 def send_backlog_reminders(client):

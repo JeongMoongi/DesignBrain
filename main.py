@@ -38,11 +38,20 @@ def verify_webhook_secret(x_webhook_secret: str = Header(default="")):
 def webhook_page_id(payload):
     return payload.get("data", {}).get("id") or payload.get("source", {}).get("id")
 
+def webhook_requester(payload):
+    """'완료'를 누른 사람의 노션 ID. 자동화가 보낸 사람을 알려 주지 않으면 페이지를 마지막으로 고친 사람으로 본다"""
+    source, data = payload.get("source", {}), payload.get("data", {})
+    return source.get("user_id") or data.get("last_edited_by", {}).get("id")
+
 @app.post("/webhook/notion", dependencies=[Depends(verify_webhook_secret)])
 async def notion_webhook_upsert(request: Request, background_tasks: BackgroundTasks):
-    page_id = webhook_page_id(await request.json())
-    if page_id: 
-        background_tasks.add_task(indexing.sync_document_to_db, page_id, config.NOTION_INTEGRATION_TOKEN, notify=True)
+    payload = await request.json()
+    page_id = webhook_page_id(payload)
+    if page_id:
+        requested_by = webhook_requester(payload)
+        logger.info("📥 [노션 웹훅] page_id: %s, 요청자: %s (source 키: %s)", page_id, requested_by, sorted(payload.get("source", {})))
+        background_tasks.add_task(indexing.sync_document_to_db, page_id, config.NOTION_INTEGRATION_TOKEN, notify=True,
+                                  requested_by=requested_by)
     return {"status": "success"}
 
 @app.post("/webhook/notion/delete", dependencies=[Depends(verify_webhook_secret)])

@@ -5,6 +5,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import backlog_slack
 import config
+import proposal_slack
 import qa_slack
 import slack_service
 
@@ -85,7 +86,38 @@ def init_slack():
         ack()
         backlog_slack.handle_backlog_button(body, client, resolve=False)
 
-    # 6. 답변에 단 👍/👎 리액션을 질문 기록에 반영 (슬랙 앱에 reaction_added/removed 이벤트 구독 필요)
+    # 6. 수집가 제안 버튼과 입력창 (담당자만 처리 가능)
+    @slack_app.action("proposal_approve")
+    def handle_proposal_approve(ack, body, client):
+        ack()
+        proposal_slack.handle_approve(body, client)
+
+    @slack_app.action("proposal_edit")
+    def handle_proposal_edit(ack, body, client):
+        ack()
+        proposal_slack.handle_edit(body, client)
+
+    @slack_app.action("proposal_hold")
+    def handle_proposal_hold(ack, body, client):
+        ack()
+        proposal_slack.handle_hold(body, client)
+
+    @slack_app.action("proposal_reject")
+    def handle_proposal_reject(ack, body, client):
+        ack()
+        proposal_slack.handle_reject(body, client)
+
+    @slack_app.view("proposal_edit_submit")
+    def handle_proposal_edit_submit(ack, body, client):
+        ack()
+        proposal_slack.handle_edit_submit(body, client)
+
+    @slack_app.view("proposal_reject_submit")
+    def handle_proposal_reject_submit(ack, body, client):
+        ack()
+        proposal_slack.handle_reject_submit(body, client)
+
+    # 7. 답변에 단 👍/👎 리액션을 질문 기록에 반영 (슬랙 앱에 reaction_added/removed 이벤트 구독 필요)
     @slack_app.event("reaction_added")
     def handle_reaction_added(event):
         qa_slack.handle_reaction(event, added=True)

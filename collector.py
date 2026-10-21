@@ -10,6 +10,9 @@
 
 정리본 청크의 payload는 원본 청크와 같은 모양(page_id, title, path, url, text, item, images)이라 검색/답변 코드를 그대로 쓴다.
 sources에는 정리에 쓴 원본 문서 목록이 들어간다 (출처. 원본이 다시 동기화되면 그 원본으로 만든 정리본을 다시 정리한다).
+
+기획자가 '완료'해 들어온 작업(requested_by = 누른 사람의 노션 ID)은 정리한 뒤 검토(review.py)까지 해서,
+충돌/누락/새 주제 제안을 그 사람에게 슬랙으로 보낸다. 같은 원본은 한 번만 검토한다.
 """
 import argparse
 import hashlib
@@ -35,7 +38,9 @@ REFINE_PROMPT = (
     "- 항목명, 수치, 용어는 원문 글자 그대로 쓴다.\n"
     "- 꾸밈말, 반복, 빈 서식은 걷어내고 '대상 — 속성: 값'처럼 짧은 문장과 목록으로 쓴다. 표의 행은 한 줄에 '열 이름: 값'으로.\n"
     "- 원본에 제목만 있고 내용이 없는 부분은 따로 줄을 만들지 말고, 섹션 끝에 '내용 없음: 제목1, 제목2'처럼 한 줄로 모아 남긴다.\n"
-    "- 다른 데이터를 가리키는 이름(예: 각인 A='협공')과 '🔗 참고 링크' 줄은 그대로 남긴다.\n\n"
+    "- 다른 데이터를 가리키는 이름(예: 각인 A='협공')과 '🔗 참고 링크' 줄은 그대로 남긴다.\n"
+    "- 원본 끝의 '📌 결정 기록'은 기획자가 승인한 결정이다. 본문과 다르면 결정 기록을 따라 해당 부분을 정리하고 "
+    "'(결정 기록 반영, 날짜)'를 붙인다. 결정 기록 자체도 마지막 '## 결정 기록' 섹션에 남긴다.\n\n"
     "[형식]\n"
     "- 첫 섹션은 '## 개요': 이 문서가 무엇을 정의하는지, 노션 위치로 보아 무엇에 속하는지 2~4문장. 본문이 거의 없으면 그렇다고 쓴다.\n"
     "- 이어서 주제별로 '## 주제 이름' 섹션을 나눈다.\n"
@@ -55,10 +60,17 @@ JOB_MAX_ATTEMPTS = 3
 def job_id(page_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"collector-job:{page_id}"))
 
-def enqueue(page_id: str) -> None:
-    """정리할 문서를 작업 목록에 올린다. 이미 있으면 요청 시각만 새로 바뀐다 (같은 문서는 한 번만 정리)"""
-    clients.get_qdrant().upsert(collection_name=config.COLLECTOR_JOB_COLLECTION, points=[
-        PointStruct(id=job_id(page_id), vector={}, payload={"page_id": page_id, "requested_at": time.time(), "attempts": 0})])
+def enqueue(page_id: str, requested_by: str = None) -> None:
+    """정리할 문서를 작업 목록에 올린다. 이미 있으면 요청 시각만 새로 바뀐다 (같은 문서는 한 번만 정리).
+    requested_by(‘완료’를 누른 사람의 노션 ID)가 있으면 정리 후 검토해 그 사람에게 제안을 보낸다.
+    기다리는 작업에 이미 요청자가 있으면 요청자 없는 재동기화가 지우지 않는다."""
+    qdrant = clients.get_qdrant()
+    if not requested_by:
+        waiting = qdrant.retrieve(collection_name=config.COLLECTOR_JOB_COLLECTION, ids=[job_id(page_id)])
+        requested_by = waiting[0].payload.get("requested_by") if waiting else None
+    qdrant.upsert(collection_name=config.COLLECTOR_JOB_COLLECTION, points=[
+        PointStruct(id=job_id(page_id), vector={}, payload={"page_id": page_id, "requested_at": time.time(), "attempts": 0,
+                                                            "requested_by": requested_by})])
 
 def pending_jobs() -> List[Dict]:
     jobs, offset = [], None
@@ -86,10 +98,14 @@ def finish_job(job: Dict, failed: bool) -> None:
 
 # --- [원본 읽기] ---
 def original_chunks(page_id: str) -> List:
+    return chunks(config.COLLECTION_NAME, page_id)
+
+def chunks(collection: str, page_id: str) -> List:
+    """문서 하나의 청크 (문서 안 순서대로)"""
     points, offset = [], None
     while True:
         batch, offset = clients.get_qdrant().scroll(
-            collection_name=config.COLLECTION_NAME, limit=256, offset=offset, with_payload=True, with_vectors=False,
+            collection_name=collection, limit=256, offset=offset, with_payload=True, with_vectors=False,
             scroll_filter=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]))
         points += batch
         if offset is None:
@@ -197,15 +213,15 @@ def refine_document(page_id: str, force: bool = False, dry_run: bool = False):
         for img in p.payload.get("images", []):
             images.setdefault(p.payload.get("item", ""), {})[img["block_id"]] = img
     header = indexing.chunk_header(title, path.split(" > ") if path else [])
-    chunks = [(item, f"{header}\n{piece}") for item, text in split_sections(refined, items) for piece in split_long_section(text)]
-    vectors = clients.get_embeddings([text for _, text in chunks])
+    pieces = [(item, f"{header}\n{piece}") for item, text in split_sections(refined, items) for piece in split_long_section(text)]
+    vectors = clients.get_embeddings([text for _, text in pieces])
     refined_at = datetime.now(backlog.KST).isoformat()
     source = {"page_id": page_id, "title": title, "url": first.get("url", "")}
     points = [PointStruct(id=refined_point_id(page_id, idx), vector=vector, payload={
         "page_id": page_id, "title": title, "path": path, "url": first.get("url", ""), "text": text, "chunk_idx": idx,
         "images": list(images.get(item, {}).values()), **({"item": item} if item else {}),
         "sources": [source], "source_hash": digest, "refined_at": refined_at})
-        for idx, ((item, text), vector) in enumerate(zip(chunks, vectors))]
+        for idx, ((item, text), vector) in enumerate(zip(pieces, vectors))]
 
     qdrant = clients.get_qdrant()
     qdrant.upsert(collection_name=config.REFINED_COLLECTION, points=points)
@@ -224,13 +240,45 @@ def delete_refined(page_id: str) -> None:
     search.invalidate_name_catalog()
 
 
+# --- [검토] ---
+def refined_head(page_id: str):
+    """정리본 첫 청크의 payload (검토 여부 기록을 여기에 둔다). 정리본이 없으면 None"""
+    points = clients.get_qdrant().retrieve(collection_name=config.REFINED_COLLECTION, ids=[refined_point_id(page_id, 0)])
+    return points[0].payload if points else None
+
+def review_and_notify(page_id: str, requested_by: str) -> List[Dict]:
+    """정리본을 검토해 제안을 백로그로 저장하고 '완료'한 사람에게 슬랙으로 보낸다.
+    같은 원본은 한 번만 검토한다 (정리본이 바뀌지 않았으면 건너뜀). 저장한 제안 목록을 돌려준다."""
+    import proposal_slack
+    import review
+    head = refined_head(page_id)
+    if head is None or head.get("reviewed_hash") == head.get("source_hash"):
+        return []
+    target = {"page_id": page_id, "title": head["title"], "url": head.get("url", "")}
+    findings = review.review_document(page_id, head["title"])
+    slack = proposal_slack.web_client()
+    assignee_id = proposal_slack.slack_user_for_notion(slack, requested_by) if slack else None
+    assignee_name = proposal_slack.user_name(slack, assignee_id) if assignee_id else None
+    review_id = str(uuid.uuid4())
+    records = [backlog.add_proposal(f, target, review.related_docs(f.get("related_docs", [])), assignee_id, assignee_name, review_id)
+               for f in findings]
+    clients.get_qdrant().set_payload(collection_name=config.REFINED_COLLECTION, payload={"reviewed_hash": head["source_hash"]},
+                                     points=[refined_point_id(page_id, 0)])
+    if records and slack:
+        proposal_slack.send_review(slack, assignee_id, target, records)
+    return records
+
+
 # --- [실행] ---
 def process_jobs() -> int:
-    """쌓인 작업을 오래된 것부터 처리하고 처리한 수를 돌려준다"""
+    """쌓인 작업을 오래된 것부터 처리하고 처리한 수를 돌려준다.
+    '완료'로 들어온 작업(requested_by)은 정리 후 검토까지 한다."""
     jobs = pending_jobs()
     for job in jobs:
         try:
             refine_document(job["page_id"])
+            if job.get("requested_by"):
+                review_and_notify(job["page_id"], job["requested_by"])
             finish_job(job, failed=False)
         except Exception:
             logger.exception("🚨 [수집가] 정리 실패 (page_id: %s)", job["page_id"])

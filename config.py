@@ -41,6 +41,10 @@ REFINED_COLLECTION = "refined_docs"
 COLLECTOR_JOB_COLLECTION = "collector_jobs"
 REFINE_MODEL = os.environ.get("REFINE_MODEL", "gpt-6.1-sol")
 REFINE_REASONING_EFFORT = os.environ.get("REFINE_REASONING_EFFORT", "low")
+# 기획자가 '완료'한 문서를 검토해 충돌/누락/새 주제를 찾을 때의 추론 강도 (모델은 REFINE_MODEL)
+REVIEW_REASONING_EFFORT = os.environ.get("REVIEW_REASONING_EFFORT", "medium")
+# 승인된 '작성이 필요함' 제안을 새 문서로 만드는 노션 DB (자동 작성 기획)
+PROPOSAL_DATABASE_ID = os.environ.get("PROPOSAL_DATABASE_ID", "400107d6982c809ab39bc6bea4a9a2f5")
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536

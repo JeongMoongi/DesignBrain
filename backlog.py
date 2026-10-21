@@ -1,5 +1,8 @@
 """백로그: 기획서와 실제 결정 사항의 차이를 기록해 두었다가, 관련 질문의 답변 끝에 참고 문구로 붙이고
-담당자에게 해결될 때까지 매일 확인 DM을 보낸다. 기획서와 별도 컬렉션(config.BACKLOG_COLLECTION)에 저장한다."""
+담당자에게 해결될 때까지 매일 확인 DM을 보낸다. 기획서와 별도 컬렉션(config.BACKLOG_COLLECTION)에 저장한다.
+
+사람이 등록한 백로그 외에, 수집가가 '완료'된 문서를 검토해 낸 제안(kind=proposal)도 같은 곳에 둔다.
+제안은 담당자가 [이대로 통과]/[고쳐서 통과]하면 노션에 반영되고, [보류]/[반려]하면 닫힌다."""
 import logging
 import re
 import uuid
@@ -13,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
 OPEN, RESOLVED = "open", "resolved"
+# 수집가 제안의 상태 (RESOLVED는 승인되어 노션에 반영됨)
+HELD, REJECTED = "held", "rejected"
+PROPOSAL = "proposal"
+# 제안 종류: 원본 문서의 결정 기록에 덧붙일 결정 / 새로 만들 문서
+DECISION, WRITING = "decision", "writing"
 
 # 답변에 붙일 백로그 선택 기준 (질문 벡터와 백로그 내용의 코사인 유사도).
 # 실측(2026-10-13): 관련 질문 0.40~0.54, 같은 기획서의 무관한 질문 0.27, 다른 주제 0.10~0.21
@@ -176,19 +184,79 @@ def open_by_assignee() -> Dict[str, List[Dict]]:
 
 def resolve(backlog_id: str, user_id: str) -> str:
     """담당자만 해결 처리할 수 있다. 결과: resolved / already / not_assignee / not_found"""
+    result = check_open(backlog_id, user_id)
+    if result != "ok":
+        return result
+    close(backlog_id, user_id, RESOLVED)
+    return "resolved"
+
+
+def check_open(backlog_id: str, user_id: str) -> str:
+    """담당자가 처리할 수 있는 미해결 백로그인지: ok / already / not_assignee / not_found"""
     record = get(backlog_id)
     if record is None:
         return "not_found"
     if record["assignee_id"] != user_id:
         return "not_assignee"
-    if record["status"] == RESOLVED:
+    if record["status"] != OPEN:
         return "already"
+    return "ok"
+
+
+def close(backlog_id: str, user_id: str, status: str, **fields) -> None:
+    """백로그를 닫는다 (해결/승인, 보류, 반려). fields는 승인한 글, 반려 사유, 노션 반영 결과 등"""
     clients.get_qdrant().set_payload(
         collection_name=config.BACKLOG_COLLECTION, points=[backlog_id],
-        payload={"status": RESOLVED, "resolved_at": datetime.now(KST).isoformat(timespec="seconds"), "resolved_by": user_id},
+        payload={"status": status, "resolved_at": datetime.now(KST).isoformat(timespec="seconds"), "resolved_by": user_id, **fields},
     )
-    logger.info("✅ [백로그 해결] %s (담당자: %s)", record["content"], user_id)
-    return "resolved"
+    logger.info("✅ [백로그 %s] %s (처리: %s)", status, backlog_id, user_id)
+
+
+def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, str]],
+                 assignee_id: Optional[str], assignee_name: Optional[str], review_id: str) -> Dict:
+    """수집가 검토에서 나온 제안 하나를 저장한다. target은 검토한 문서 {"page_id", "title", "url"}.
+    finding: {"type": decision|writing, "title", "problem", "proposal", "new_doc_title"}"""
+    backlog_id = str(uuid.uuid4())
+    title = finding["title"]
+    record = {
+        "backlog_id": backlog_id,
+        "kind": PROPOSAL,
+        "proposal_type": finding["type"],
+        "content": title,
+        "problem": finding.get("problem", ""),
+        "proposal": finding.get("proposal", ""),
+        # 수집가가 근거 없이 새로 정한 부분 (승인 전에 확인하도록 슬랙에 따로 보여준다)
+        "assumptions": finding.get("assumptions", ""),
+        "new_doc_title": finding.get("new_doc_title", ""),
+        # 답변 끝 참고 문구: 이 부분은 아직 기획자 확인을 기다린다는 것을 알린다
+        "note": f"아직 기획자 확인을 기다리는 부분이에요 — {title}",
+        "reporter_id": "",
+        "reporter_name": "수집가",
+        "assignee_id": assignee_id or "",
+        "assignee_name": assignee_name,
+        "page_ids": [target["page_id"]],
+        "docs": [target] + [d for d in related if d["page_id"] != target["page_id"]],
+        "status": OPEN,
+        "created_at": datetime.now(KST).isoformat(),
+        "source": {"review_id": review_id},
+    }
+    vector = clients.get_embedding(f"{title}\n{record['problem']}")
+    clients.get_qdrant().upsert(collection_name=config.BACKLOG_COLLECTION,
+                                points=[PointStruct(id=backlog_id, vector=vector, payload=record)])
+    return record
+
+
+def proposals_for_page(page_id: str) -> List[Dict]:
+    """이 문서에 대해 수집가가 냈던 제안 전부 (상태 무관, 오래된 순). 같은 제안을 다시 내지 않도록 검토에 넘긴다"""
+    records, offset = [], None
+    while True:
+        points, offset = clients.get_qdrant().scroll(
+            collection_name=config.BACKLOG_COLLECTION, limit=256, offset=offset, with_payload=True,
+            scroll_filter=Filter(must=[FieldCondition(key="page_ids", match=MatchValue(value=page_id))]),
+        )
+        records += [p.payload for p in points if p.payload.get("kind") == PROPOSAL]
+        if offset is None:
+            return sorted(records, key=lambda r: r["created_at"])
 
 
 def seconds_until_next(hour: int, now: Optional[datetime] = None) -> float:
