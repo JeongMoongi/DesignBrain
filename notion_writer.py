@@ -93,22 +93,33 @@ def create_proposal_page(title: str, text: str, assignee_notion_id: Optional[str
     return {"page_id": page["id"], "url": page.get("url", "")}
 
 
-# --- [노션 사용자 ↔ 이메일] ---
-def user_email(notion_user_id: str) -> Optional[str]:
-    """노션 사용자 이메일 (연동에 '이메일을 포함한 사용자 정보 읽기' 권한 필요). 실패하면 None"""
+# --- [노션 사용자 ↔ 슬랙 사용자: 이메일, 다르면 이름으로 맞춘다] ---
+def normalize_person(name: Optional[str]) -> str:
+    return re.sub(r"\s+", "", name or "").lower()
+
+
+def user_info(notion_user_id: str) -> Dict[str, str]:
+    """{"email", "name"} (연동에 '이메일을 포함한 사용자 정보 읽기' 권한 필요). 실패하면 빈 dict"""
     try:
-        return _request("GET", f"users/{notion_user_id}").get("person", {}).get("email")
+        user = _request("GET", f"users/{notion_user_id}")
     except Exception as e:
-        logger.warning("⚠️ [노션] 사용자 이메일 조회 실패 (%s): %s", notion_user_id, e)
-        return None
+        logger.warning("⚠️ [노션] 사용자 정보 조회 실패 (%s): %s", notion_user_id, e)
+        return {}
+    return {"email": user.get("person", {}).get("email", ""), "name": user.get("name", "")}
 
 
-def user_id_by_email(email: Optional[str]) -> Optional[str]:
-    if not email:
-        return None
+def user_id_by(email: Optional[str], names: List[str]) -> Optional[str]:
+    """이메일이 같은 노션 사용자, 없으면 이름이 같은 사람이 한 명뿐일 때 그 사람 (슬랙과 노션의 이메일이 다른 경우)"""
     try:
-        users = notion_parser.fetch_all_pages("GET", f"{API}/users", config.NOTION_INTEGRATION_TOKEN) or []
+        users = [u for u in notion_parser.fetch_all_pages("GET", f"{API}/users", config.NOTION_INTEGRATION_TOKEN) or []
+                 if u.get("type") == "person"]
     except Exception as e:
         logger.warning("⚠️ [노션] 사용자 목록 조회 실패: %s", e)
         return None
-    return next((u["id"] for u in users if u.get("person", {}).get("email", "").lower() == email.lower()), None)
+    if email:
+        found = next((u["id"] for u in users if u.get("person", {}).get("email", "").lower() == email.lower()), None)
+        if found:
+            return found
+    wanted = {normalize_person(n) for n in names if n}
+    matched = [u["id"] for u in users if normalize_person(u.get("name")) in wanted]
+    return matched[0] if len(matched) == 1 else None

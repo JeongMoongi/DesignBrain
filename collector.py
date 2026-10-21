@@ -257,15 +257,17 @@ def review_and_notify(page_id: str, requested_by: str) -> List[Dict]:
     target = {"page_id": page_id, "title": head["title"], "url": head.get("url", "")}
     findings = review.review_document(page_id, head["title"])
     slack = proposal_slack.web_client()
-    assignee_id = proposal_slack.slack_user_for_notion(slack, requested_by) if slack else None
-    assignee_name = proposal_slack.user_name(slack, assignee_id) if assignee_id else None
+    requester = proposal_slack.slack_user_for_notion(slack, requested_by) if slack else None
+    # '완료'한 사람을 슬랙에서 찾지 못하면 대신 받는 사람(문서 진단 담당자)이 처리한다
+    assignee_id = requester or config.DIAGNOSIS_REPORT_USER_ID
+    assignee_name = proposal_slack.user_name(slack, assignee_id) if slack and assignee_id else None
     review_id = str(uuid.uuid4())
     records = [backlog.add_proposal(f, target, review.related_docs(f.get("related_docs", [])), assignee_id, assignee_name, review_id)
                for f in findings]
     clients.get_qdrant().set_payload(collection_name=config.REFINED_COLLECTION, payload={"reviewed_hash": head["source_hash"]},
                                      points=[refined_point_id(page_id, 0)])
     if records and slack:
-        proposal_slack.send_review(slack, assignee_id, target, records)
+        proposal_slack.send_review(slack, assignee_id, target, records, requester_found=bool(requester))
     return records
 
 

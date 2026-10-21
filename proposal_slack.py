@@ -34,24 +34,39 @@ def user_name(client, user_id):
     return slack_service.user_name(client, user_id)
 
 
+def slack_names(member: Dict) -> List[str]:
+    profile = member.get("profile", {})
+    return [member.get("real_name"), profile.get("real_name"), profile.get("display_name")]
+
+
 def slack_user_for_notion(client, notion_user_id: Optional[str]) -> Optional[str]:
-    email = notion_writer.user_email(notion_user_id) if notion_user_id else None
-    if not email:
+    """노션 사용자와 이메일이 같은 슬랙 사용자, 없으면 이름이 같은 사람이 한 명뿐일 때 그 사람"""
+    info = notion_writer.user_info(notion_user_id) if notion_user_id else {}
+    if not info:
         return None
+    if info.get("email"):
+        try:
+            return client.users_lookupByEmail(email=info["email"])["user"]["id"]
+        except Exception as e:
+            logger.info("ℹ️ [Slack] 이메일로 찾지 못해 이름으로 찾습니다 (%s): %s", info["name"], e)
     try:
-        return client.users_lookupByEmail(email=email)["user"]["id"]
+        members = [m for page in client.users_list(limit=200) for m in page["members"]
+                   if not m.get("is_bot") and not m.get("deleted")]
     except Exception as e:
-        logger.warning("⚠️ [Slack] 이메일로 사용자를 찾지 못했습니다 (users:read.email 권한 필요): %s", e)
+        logger.warning("⚠️ [Slack] 사용자 목록 조회 실패: %s", e)
         return None
+    wanted = notion_writer.normalize_person(info.get("name"))
+    matched = [m["id"] for m in members if wanted and wanted in map(notion_writer.normalize_person, slack_names(m))]
+    return matched[0] if len(matched) == 1 else None
 
 
 def notion_user_for_slack(client, slack_user_id: str) -> Optional[str]:
     try:
-        email = client.users_info(user=slack_user_id)["user"].get("profile", {}).get("email")
+        member = client.users_info(user=slack_user_id)["user"]
     except Exception as e:
-        logger.warning("⚠️ [Slack] 사용자 이메일 조회 실패 (users:read.email 권한 필요): %s", e)
+        logger.warning("⚠️ [Slack] 사용자 정보 조회 실패 (%s): %s", slack_user_id, e)
         return None
-    return notion_writer.user_id_by_email(email)
+    return notion_writer.user_id_by(member.get("profile", {}).get("email"), slack_names(member))
 
 
 def clip(text: str, limit: int) -> str:
@@ -89,13 +104,13 @@ def item_blocks(record: Dict) -> List[Dict]:
     ]
 
 
-def send_review(client, assignee_id: Optional[str], target: Dict, records: List[Dict]) -> None:
-    """검토 결과를 한 스레드로 보낸다. '완료'한 사람을 슬랙에서 찾지 못하면 문서 진단 담당자에게 보낸다."""
-    channel = assignee_id or config.DIAGNOSIS_REPORT_USER_ID
+def send_review(client, assignee_id: Optional[str], target: Dict, records: List[Dict], requester_found: bool = True) -> None:
+    """검토 결과를 담당자에게 한 스레드로 보낸다. requester_found가 아니면 '완료'한 사람 대신 받은 것이라고 알린다."""
+    channel = assignee_id
     if not channel:
         logger.warning("⚠️ [수집가] 제안을 보낼 사람이 없습니다 ('%s' %d건)", target["title"], len(records))
         return
-    note = "" if assignee_id else "\n('완료'한 분을 슬랙에서 찾지 못해 대신 보내요)"
+    note = "" if requester_found else "\n('완료'한 분을 슬랙에서 찾지 못해 대신 보내요)"
     head = client.chat_postMessage(channel=channel, text=(
         f"🧹 <{target['url']}|{target['title']}> 을(를) 정리하면서 확인이 필요한 것 *{len(records)}건*을 찾았어요.\n"
         f"통과하면 노션에 바로 반영돼요. 스레드에서 하나씩 처리해 주세요.{note}"))

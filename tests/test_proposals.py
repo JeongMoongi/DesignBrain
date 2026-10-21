@@ -143,7 +143,7 @@ def test_review_runs_once_per_original_and_sends_proposals(store, monkeypatch):
     monkeypatch.setattr(review, "review_document", lambda page_id, title: reviews.append(page_id) or [DECISION, WRITING])
     monkeypatch.setattr(review, "related_docs", lambda names: [])
     monkeypatch.setattr(proposal_slack, "web_client", lambda: slack)
-    monkeypatch.setattr(notion_writer, "user_email", lambda notion_id: "u7@game.com")
+    monkeypatch.setattr(notion_writer, "user_info", lambda notion_id: {"email": "u7@game.com", "name": "칠번"})
 
     records = collector.review_and_notify("P1", "N7")
     assert [r["assignee_id"] for r in records] == ["U7", "U7"]
@@ -159,10 +159,32 @@ def test_item_shows_assumptions_before_proposal(store):
     assert "근거 없이" not in proposal_slack.item_blocks(add())[1]["text"]["text"]
 
 
+def test_slack_user_is_found_by_name_when_emails_differ(monkeypatch):
+    monkeypatch.setattr(notion_writer, "user_info", lambda notion_id: {"email": "me@company.com", "name": "정 문기"})
+
+    class Slack(FakeSlack):
+        def users_lookupByEmail(self, email):
+            raise RuntimeError("users_not_found")
+
+        def users_list(self, limit):
+            return [{"members": [{"id": "U9", "real_name": "정문기", "profile": {}},
+                                 {"id": "U8", "real_name": "정진섭", "profile": {}},
+                                 {"id": "B1", "real_name": "정문기", "is_bot": True, "profile": {}}]}]
+    assert proposal_slack.slack_user_for_notion(Slack(), "N1") == "U9"
+
+
 def test_review_goes_to_report_user_when_requester_is_unknown(store, monkeypatch):
+    """대신 받은 사람이 담당자가 되어 버튼을 누를 수 있어야 한다"""
     monkeypatch.setattr(config, "DIAGNOSIS_REPORT_USER_ID", "UADMIN")
+    store.upsert(config.REFINED_COLLECTION, [PointStruct(id=collector.refined_point_id("P1", 0), vector=VECTOR, payload={
+        "page_id": "P1", "title": "디고리", "text": "문서: 디고리\n## 개요", "chunk_idx": 0, "source_hash": "h1"})])
     slack = FakeSlack()
-    proposal_slack.send_review(slack, None, TARGET, [add(assignee=None)])
+    monkeypatch.setattr(review, "review_document", lambda page_id, title: [DECISION])
+    monkeypatch.setattr(review, "related_docs", lambda names: [])
+    monkeypatch.setattr(proposal_slack, "web_client", lambda: slack)
+    monkeypatch.setattr(notion_writer, "user_info", lambda notion_id: {})
+    records = collector.review_and_notify("P1", "N-unknown")
+    assert records[0]["assignee_id"] == "UADMIN"
     assert slack.posts[0]["channel"] == "UADMIN"
     assert "찾지 못해" in slack.posts[0]["text"]
 
@@ -174,7 +196,7 @@ def notion_fakes(monkeypatch):
     monkeypatch.setattr(notion_writer, "append_decision", lambda *args: written.append(("decision",) + args))
     monkeypatch.setattr(notion_writer, "create_proposal_page",
                         lambda *args: written.append(("page",) + args) or {"page_id": "NEW", "url": "https://notion/NEW"})
-    monkeypatch.setattr(notion_writer, "user_id_by_email", lambda email: f"N-{email}")
+    monkeypatch.setattr(notion_writer, "user_id_by", lambda email, names: f"N-{email}")
     monkeypatch.setattr(indexing, "sync_document_to_db", lambda page_id, token, requested_by=None: synced.append((page_id, requested_by)))
 
     class NowThread:
@@ -248,7 +270,7 @@ def test_notion_failure_keeps_proposal_open(store, monkeypatch):
     def fail(*args):
         raise RuntimeError("노션 API 실패 (403)")
     monkeypatch.setattr(notion_writer, "append_decision", fail)
-    monkeypatch.setattr(notion_writer, "user_id_by_email", lambda email: None)
+    monkeypatch.setattr(notion_writer, "user_id_by", lambda email, names: None)
     record, slack = add(), FakeSlack()
     proposal_slack.handle_approve(button_body(record, "proposal_approve"), slack)
     assert backlog.get(record["backlog_id"])["status"] == backlog.OPEN
