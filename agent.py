@@ -42,7 +42,7 @@ SYSTEM_PROMPT = (
 # 정리본을 읽을 때 덧붙이는 안내 (config.AGENT_SOURCE == "refined")
 REFINED_PROMPT = (
     "\n\n[자료에 대해]\n"
-    "- search_docs/list_docs/read_document가 보여주는 자료는 수집가가 노션 원본 기획서를 읽기 쉽게 다시 쓴 정리본이다. "
+    "- search_docs/list_docs/read_document가 보여주는 자료는 사서가 노션 원본 기획서를 읽기 쉽게 다시 쓴 정리본이다. "
     "문서 제목과 항목 이름은 원본과 같다.\n"
     "- 정리본만으로 애매하거나, 원문 표현·수치를 그대로 확인해야 하면 read_original로 같은 문서의 원본을 읽어라."
 )

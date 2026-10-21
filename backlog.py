@@ -231,7 +231,8 @@ def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, 
         # 답변 끝 참고 문구: 이 부분은 아직 기획자 확인을 기다린다는 것을 알린다
         "note": f"아직 기획자 확인을 기다리는 부분이에요 — {title}",
         "reporter_id": "",
-        "reporter_name": "수집가",
+        # 슬랙에 보이는 이름 (수집가는 기능을 가리키는 내부 이름이라 사용자에게는 '사서'로 보인다)
+        "reporter_name": "사서",
         "assignee_id": assignee_id or "",
         "assignee_name": assignee_name,
         "page_ids": [target["page_id"]],

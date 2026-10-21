@@ -95,7 +95,10 @@ def test_append_decision_adds_heading_once(notion_calls, monkeypatch):
     assert (method, path) == ("PATCH", "blocks/P1/children")
     kinds = [b["type"] for b in body["children"]]
     assert kinds == ["heading_2", "paragraph", "bulleted_list_item"]
-    assert "승인: 정문기" in body["children"][1]["paragraph"]["rich_text"][1]["text"]["content"]
+    title, stamp = body["children"][1]["paragraph"]["rich_text"]
+    # 결정 기록에는 승인된 결정만 들어가므로 '결정이 필요함:'을 뗀다
+    assert title["text"]["content"] == "X"
+    assert "승인: 정문기" in stamp["text"]["content"]
 
     monkeypatch.setattr(notion_writer, "has_decision_heading", lambda page_id: True)
     notion_writer.append_decision("P1", "결정이 필요함: Y", "내용", None)

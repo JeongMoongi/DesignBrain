@@ -85,7 +85,7 @@ def item_blocks(record: Dict) -> List[Dict]:
     head = [f"*{record['content']}*", record.get("problem", "")]
     if record.get("docs"):
         head.append(f"참고 문서: {doc_links(record['docs'])}")
-    proposal = f"💡 *수집가 제안* — 통과하면 {what}\n```{record['proposal']}```"
+    proposal = f"💡 *사서 제안* — 통과하면 {what}\n```{record['proposal']}```"
     if record.get("assumptions"):
         proposal = f"⚠️ *근거 없이 정한 부분:* {record['assumptions']}\n" + proposal
     return [
