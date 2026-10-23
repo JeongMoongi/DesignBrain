@@ -56,9 +56,9 @@ def _connect_qdrant() -> QdrantClient:
                                                 # 질문 기록은 검색하지 않으므로 벡터 없이 저장한다
                                                 (config.QA_LOG_COLLECTION, {}, ["answer_ts"]),
                                                 (config.DIAGNOSIS_COLLECTION, {}, []),
+                                                (config.PROPERTY_CHECK_COLLECTION, {}, []),
                                                 (config.REFINED_COLLECTION, text_vectors, ["page_id", "item", "sources[].page_id"]),
-                                                (config.LIBRARIAN_JOB_COLLECTION, {}, []),
-                                                (config.LIBRARIAN_USAGE_COLLECTION, {}, [])):
+                                                (config.LIBRARIAN_JOB_COLLECTION, {}, [])):
         if not client.collection_exists(collection):
             client.create_collection(collection_name=collection, vectors_config=vectors)
             logger.info("✨ [Qdrant] '%s' 컬렉션이 새로 생성되었습니다.", collection)

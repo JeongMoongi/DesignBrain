@@ -5,6 +5,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import backlog_slack
 import config
+import property_slack
 import proposal_slack
 import qa_slack
 import slack_service
@@ -135,7 +136,28 @@ def init_slack():
         ack()
         proposal_slack.handle_reject_submit(body, client)
 
-    # 7. 답변에 단 👍/👎 리액션을 질문 기록에 반영 (슬랙 앱에 reaction_added/removed 이벤트 구독 필요)
+    # 7. 기획서 속성 검사 버튼과 입력창 (담당자만 처리 가능)
+    @slack_app.action("property_apply")
+    def handle_property_apply(ack, body, client):
+        ack()
+        property_slack.handle_apply(body, client)
+
+    @slack_app.action("property_edit")
+    def handle_property_edit(ack, body, client):
+        ack()
+        property_slack.handle_edit(body, client)
+
+    @slack_app.action("property_skip")
+    def handle_property_skip(ack, body, client):
+        ack()
+        property_slack.handle_skip(body, client)
+
+    @slack_app.view("property_edit_submit")
+    def handle_property_edit_submit(ack, body, client):
+        ack()
+        property_slack.handle_edit_submit(body, client)
+
+    # 8. 답변에 단 👍/👎 리액션을 질문 기록에 반영 (슬랙 앱에 reaction_added/removed 이벤트 구독 필요)
     @slack_app.event("reaction_added")
     def handle_reaction_added(event):
         qa_slack.handle_reaction(event, added=True)

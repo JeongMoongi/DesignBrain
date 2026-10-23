@@ -10,6 +10,7 @@ import librarian
 import doc_diagnosis
 import config
 import notion_parser
+import property_check
 import search
 
 logger = logging.getLogger(__name__)
@@ -119,14 +120,15 @@ def _page_lock(page_id: str) -> threading.Lock:
     with _page_locks_guard:
         return _page_locks.setdefault(page_id, threading.Lock())
 
-def sync_document_to_db(page_id: str, notion_token: str, requested_by: str = None):
+def sync_document_to_db(page_id: str, notion_token: str, requested_by: str = None, check_properties: bool = False):
     """노션 문서를 파싱해 청크로 나눠 Qdrant에 저장. 휴지통 문서는 저장하지 않고 인덱스에서 제거한다.
     저장한 뒤 문서 진단을 남기고, 사서 작업 목록에 올려 정리본을 새로 만들게 한다.
+    check_properties면 노션 속성이 비었는지도 검사해 채울 값을 슬랙으로 묻는다 (property_check.py). 'DB 등록' 버튼의 웹훅만 켠다.
     requested_by('완료'한 사람의 노션 ID)가 있으면 사서가 검토까지 해서 그 사람에게 제안을 보낸다."""
     with _page_lock(page_id):
-        return _sync_document(page_id, notion_token, requested_by)
+        return _sync_document(page_id, notion_token, requested_by, check_properties)
 
-def _sync_document(page_id: str, notion_token: str, requested_by: str = None):
+def _sync_document(page_id: str, notion_token: str, requested_by: str = None, check_properties: bool = False):
     doc_data = notion_parser.parse_notion_page_deep(page_id, notion_token)
 
     if doc_data and doc_data.get("trashed"):
@@ -196,6 +198,10 @@ def _sync_document(page_id: str, notion_token: str, requested_by: str = None):
 
     logger.info("🎉 [동기화 완료] '%s' (%d개 청크 저장)", title, len(points))
     doc_diagnosis.run(doc_data)
+    # 'DB 등록' 버튼으로 들어온 동기화만 노션 속성(이름/개요/상태/담당자/마지막 수정)이 비었는지 검사한다.
+    # 전체 재동기화나 사서 제안 승인 뒤의 재동기화는 검사하지 않는다 (사람이 누르지 않은 알림을 막기 위함)
+    if check_properties:
+        property_check.run(doc_data, notion_token, requested_by)
     try:
         librarian.enqueue(page_id, requested_by)
     except Exception as e:

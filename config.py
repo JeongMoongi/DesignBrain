@@ -37,11 +37,16 @@ QA_REPORT_HOUR = 10
 DIAGNOSIS_COLLECTION = "doc_diagnoses"
 # '완료'한 사람을 슬랙에서 찾지 못했을 때 사서 제안을 대신 받는 사람 (기본: 질문 기록 요약 받는 사람)
 DIAGNOSIS_REPORT_USER_ID = os.environ.get("DIAGNOSIS_REPORT_USER_ID") or QA_REPORT_USER_ID
+# 기획서 속성 검사(property_check.py): '완료'한 문서에 아래 속성이 비어 있으면 AI가 채울 값을 슬랙으로 물어본다 (벡터 없음)
+PROPERTY_CHECK_COLLECTION = "property_checks"
+# 노션 기획서 DB의 속성(열) 이름. 팀 DB의 이름이 다르면 환경변수로 바꾼다. 기획서 이름은 제목(title) 속성이라 따로 정하지 않는다
+PROPERTY_SUMMARY = os.environ.get("PROPERTY_SUMMARY", "기획서 개요")
+PROPERTY_STATUS = os.environ.get("PROPERTY_STATUS", "상태")
+PROPERTY_OWNER = os.environ.get("PROPERTY_OWNER", "담당자")
+PROPERTY_MODIFIED = os.environ.get("PROPERTY_MODIFIED", "마지막 수정")
 # 사서(librarian.py)가 원본을 정리한 정리본과, 정리할 문서 작업 목록 (벡터 없음)
 REFINED_COLLECTION = "refined_docs"
 LIBRARIAN_JOB_COLLECTION = "librarian_jobs"
-# 사서가 모델을 쓴 기록 (작업별 토큰을 주간 요약에 보여준다, 벡터 없음)
-LIBRARIAN_USAGE_COLLECTION = "librarian_usage"
 REFINE_MODEL = os.environ.get("REFINE_MODEL", "gpt-6.1-sol")
 REFINE_REASONING_EFFORT = os.environ.get("REFINE_REASONING_EFFORT", "low")
 # 기획자가 '완료'한 문서를 검토해 충돌/누락/새 주제를 찾을 때의 추론 강도 (모델은 REFINE_MODEL)
