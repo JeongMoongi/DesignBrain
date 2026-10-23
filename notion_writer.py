@@ -101,6 +101,12 @@ def create_proposal_page(title: str, text: str, assignee_notion_id: Optional[str
     return {"page_id": page["id"], "url": page.get("url", "")}
 
 
+def update_page_properties(page_id: str, properties: Dict) -> None:
+    """페이지 속성 값을 쓴다 (properties: {속성 이름: 노션 속성 값}). 노션 연동에 '콘텐츠 업데이트' 권한이 있어야 한다."""
+    _request("PATCH", f"pages/{page_id}", {"properties": properties})
+    logger.info("📝 [노션 쓰기] 속성 입력: %s (page_id: %s)", ", ".join(properties), page_id)
+
+
 # --- [노션 사용자 ↔ 슬랙 사용자: 이메일, 다르면 이름으로 맞춘다] ---
 def normalize_person(name: Optional[str]) -> str:
     return re.sub(r"\s+", "", name or "").lower()

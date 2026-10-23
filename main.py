@@ -50,7 +50,8 @@ async def notion_webhook_upsert(request: Request, background_tasks: BackgroundTa
     if page_id:
         requested_by = webhook_requester(payload)
         logger.info("📥 [노션 웹훅] page_id: %s, 요청자: %s (source 키: %s)", page_id, requested_by, sorted(payload.get("source", {})))
-        background_tasks.add_task(indexing.sync_document_to_db, page_id, config.NOTION_INTEGRATION_TOKEN, requested_by=requested_by)
+        background_tasks.add_task(indexing.sync_document_to_db, page_id, config.NOTION_INTEGRATION_TOKEN, requested_by=requested_by,
+                                    check_properties=True)
     return {"status": "success"}
 
 @app.post("/webhook/notion/delete", dependencies=[Depends(verify_webhook_secret)])

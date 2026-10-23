@@ -37,6 +37,15 @@ QA_REPORT_HOUR = 10
 DIAGNOSIS_COLLECTION = "doc_diagnoses"
 # '완료'한 사람을 슬랙에서 찾지 못했을 때 사서 제안을 대신 받는 사람 (기본: 질문 기록 요약 받는 사람)
 DIAGNOSIS_REPORT_USER_ID = os.environ.get("DIAGNOSIS_REPORT_USER_ID") or QA_REPORT_USER_ID
+# 기획서 속성 검사(property_check.py): '완료'한 문서에 아래 속성이 비어 있으면 AI가 채울 값을 슬랙으로 물어본다 (벡터 없음)
+PROPERTY_CHECK_COLLECTION = "property_checks"
+# 노션 기획서 DB의 속성(열) 이름. 팀 DB의 이름이 다르면 환경변수로 바꾼다. 기획서 이름은 제목(title) 속성이라 따로 정하지 않는다
+PROPERTY_SUMMARY = os.environ.get("PROPERTY_SUMMARY", "기획서 개요")
+PROPERTY_STATUS = os.environ.get("PROPERTY_STATUS", "상태")
+PROPERTY_OWNER = os.environ.get("PROPERTY_OWNER", "담당자")
+PROPERTY_MODIFIED = os.environ.get("PROPERTY_MODIFIED", "마지막 수정")
+# 속성 검사를 할 기획서 DB의 ID (쉼표로 구분, 선택). 비워 두면 위 속성 열이 2개 이상 있는 DB를 기획서 DB로 본다
+PLANNING_DATABASE_IDS = [i.strip().replace("-", "").lower() for i in os.environ.get("PLANNING_DATABASE_IDS", "").split(",") if i.strip()]
 # 사서(librarian.py)가 원본을 정리한 정리본과, 정리할 문서 작업 목록 (벡터 없음)
 REFINED_COLLECTION = "refined_docs"
 LIBRARIAN_JOB_COLLECTION = "librarian_jobs"
