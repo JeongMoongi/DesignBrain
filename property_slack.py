@@ -1,5 +1,6 @@
 """기획서 속성 검사 결과를 슬랙으로 보내고 버튼을 처리한다 (검사와 제안값은 property_check.py).
-'DB 등록' 버튼을 누른 사람에게 DM으로 [✅ 이대로 적용] [✏️ 고쳐서 적용] [💬 대화로 고치기] [🙅 적용 안 함] 버튼이 달린 메세지를 보낸다.
+'DB 등록' 버튼을 누른 사람에게 DM으로 [✅ 이대로 적용] [✏️ 고쳐서 적용] [💬 대화로 고치기] [🔁 토스] [🙅 적용 안 함] 버튼이 달린 메세지를 보낸다.
+토스하면 새 담당자에게 같은 메세지를 보내고, 담당자 속성을 채우는 중이었으면 그 값도 새 담당자로 바꾼다.
 적용하면 노션 속성에 바로 입력하고, 기획서 이름이 바뀌었으면 그 문서를 다시 동기화한다.
 그 메세지의 스레드에 쓴 말은 사서가 고칠 지시로 받아 이름/개요/상태를 고치고, 고친 값을 원래 메세지에 반영한다.
 
@@ -51,6 +52,8 @@ def message_blocks(record: Dict, missing: List[Dict], requester_found: bool = Tr
     proposal = record["proposal"]
     empty = [m for m in missing if m["reason"] == EMPTY]
     head = [f"⚠️ {doc_link(record)} 문서에 비어 있는 속성이 있어요: *{', '.join(m['label'] for m in empty)}*"]
+    if record.get("toss_note"):
+        head.insert(0, record["toss_note"])
     unsupported = [m for m in missing if m["reason"] == UNSUPPORTED]
     if unsupported:
         head.append(f"(노션 DB에 '{', '.join(m['property'] for m in unsupported)}' 속성이 없거나 종류가 달라서 자동 입력은 못 해요)")
@@ -76,6 +79,8 @@ def message_blocks(record: Dict, missing: List[Dict], requester_found: bool = Tr
     if chat_keys(missing):
         buttons.append({"type": "button", "action_id": "property_chat", "value": record["page_id"],
                         "text": {"type": "plain_text", "text": "💬 대화로 고치기"}})
+    buttons.append({"type": "button", "action_id": "property_toss", "value": record["page_id"],
+                    "text": {"type": "plain_text", "text": "🔁 토스"}})
     buttons.append({"type": "button", "action_id": "property_skip", "value": record["page_id"],
                     "text": {"type": "plain_text", "text": "🙅 적용 안 함"}})
     blocks.append({"type": "actions", "block_id": actions_block_id(record["page_id"]), "elements": buttons})
@@ -358,3 +363,49 @@ def handle_chat_message(client, event) -> bool:
         f"✏️ {result['reply']}\n{changed}\n위 메세지에 반영했어요. 마음에 들면 [✅ 이대로 적용]을 눌러 주세요."))
     return True
 
+
+# --- [토스: 다른 담당자에게 넘기기] ---
+def handle_toss(body, client) -> None:
+    """토스: 넘길 사람과 한마디를 묻는다"""
+    record, _, channel_id, ts = pressed(body, client)
+    if record:
+        client.views_open(trigger_id=body["trigger_id"], view=librarian_slack.toss_view(
+            "property_toss_submit", proposal_clip(f"*{record.get('title') or '제목 없음'}* 속성 검사"),
+            modal_metadata(record, channel_id, ts)))
+
+
+def tossed_proposal(client, record: Dict, to_user: str) -> Dict[str, Dict]:
+    """담당자를 채우는 중이었으면 담당자 값을 새 담당자로 바꾼 제안. 노션에서 그 사람을 찾지 못하면 담당자는 노션에서 직접 채우게 뺀다"""
+    proposal = dict(record["proposal"])
+    if not any(m["key"] == OWNER and m["reason"] == EMPTY for m in property_check.missing_items(record)):
+        return proposal
+    proposal.pop(OWNER, None)
+    notion_user = proposal_slack.notion_user_for_slack(client, to_user)
+    if notion_user:
+        proposal[OWNER] = {"text": proposal_slack.user_name(client, to_user) or "(노션 사용자)", "value": notion_user}
+    return proposal
+
+
+def handle_toss_submit(body, client) -> None:
+    """담당자를 바꾸고, 새 담당자에게 같은 메세지를 보내고, 원래 메세지에 넘겼다고 남긴다.
+    대화로 고치던 중이었으면 고친 값은 넘어가고, 새 담당자는 새 메세지의 스레드에서 이어서 고친다."""
+    meta, to_user, memo = librarian_slack.toss_input(body["view"])
+    user_id = body["user"]["id"]
+    if not to_user or to_user == user_id:
+        return
+    record = authorize(client, meta["channel"], user_id, meta["page_id"], meta["ts"])
+    if not record:
+        return
+    if "chat_history" in record:
+        client.chat_postMessage(channel=meta["channel"], thread_ts=record["slack_ts"],
+                                text=f"🔁 <@{to_user}> 님에게 넘겼어요. 이 스레드는 더 이상 쓰지 않아요.")
+        del record["chat_history"]
+    record.update(proposal=tossed_proposal(client, record, to_user), assignee_id=to_user, requester_found=True,
+                  toss_history=librarian_slack.toss_history(record, user_id, to_user, memo),
+                  toss_note=librarian_slack.toss_notice(user_id, "기획서 속성 검사를", memo) + "\n담당이 아니면 다시 [🔁 토스]로 넘길 수 있어요.")
+    sent = client.chat_postMessage(channel=to_user, text=message_text(record), blocks=message_blocks(record, property_check.missing_items(record)))
+    record.update(slack_channel=sent["channel"], slack_ts=sent["ts"])
+    property_check.save_record(record)
+    status_text = f"🔁 <@{to_user}> 님에게 넘겼어요."
+    client.chat_update(channel=meta["channel"], ts=meta["ts"], text=status_text, blocks=result_blocks(record, status_text))
+    logger.info("🔁 [속성 검사] %s → %s: %s", user_id, to_user, record.get("title"))

@@ -164,7 +164,7 @@ def test_run_warns_the_requester_with_proposal_and_buttons(env):
     assert "⚠️" in text and "기획서 개요, 상태, 담당자, 마지막 수정" in text and "디고리는 근접 영웅이다." in text
     assert "사서 제안" in text and "AI 제안" not in text
     actions = [b for b in sent["blocks"] if b["type"] == "actions"][0]
-    assert [e["action_id"] for e in actions["elements"]] == ["property_apply", "property_edit", "property_chat", "property_skip"]
+    assert [e["action_id"] for e in actions["elements"]] == ["property_apply", "property_edit", "property_chat", "property_toss", "property_skip"]
     assert property_check.get_record(PAGE_ID)["slack_ts"] == "1.0"
 
 
@@ -465,6 +465,87 @@ def test_failed_revision_is_reported_and_keeps_the_proposal(env, monkeypatch):
     property_slack.handle_chat_message(env.slack, thread_message("바꿔 줘"))
     assert env.slack.updates[-1]["text"].startswith("❌ 고치지 못했어요.")
     assert property_check.get_record(PAGE_ID)["proposal"]["summary"]["value"] == "디고리는 근접 영웅이다."
+
+
+# --- 토스 ---
+def toss_submit(env, to_user, memo="", user="U1"):
+    view = env.slack.views[-1]
+    view["state"] = {"values": {"to": {"value": {"selected_user": to_user}}, "memo": {"value": {"value": memo}}}}
+    property_slack.handle_toss_submit({"user": {"id": user}, "view": view}, env.slack)
+
+
+@pytest.fixture
+def slack_people(monkeypatch):
+    """슬랙 U2는 노션 N-U2, 슬랙 U3은 노션에 없음"""
+    monkeypatch.setattr(proposal_slack, "notion_user_for_slack", lambda client, slack_id: {"U2": "N-U2"}.get(slack_id))
+    monkeypatch.setattr(proposal_slack, "user_name", lambda client, slack_id: f"이름-{slack_id}")
+
+
+def test_toss_sends_the_check_to_another_planner_as_the_new_owner(env, slack_people):
+    record = run()
+    property_slack.handle_toss(button(record, "property_toss"), env.slack)
+    assert env.slack.views[-1]["callback_id"] == "property_toss_submit"
+    toss_submit(env, "U2", "영웅 담당이라 넘겨요")
+
+    saved = property_check.get_record(PAGE_ID)
+    assert saved["assignee_id"] == "U2" and saved["slack_ts"] == "2.0"
+    assert saved["toss_history"][0]["memo"] == "영웅 담당이라 넘겨요"
+    # 담당자 속성도 새 담당자로 채운다
+    assert saved["proposal"]["owner"] == {"text": "이름-U2", "value": "N-U2"}
+    sent = env.slack.posts[-1]
+    text = json.dumps(sent["blocks"], ensure_ascii=False)
+    assert sent["channel"] == "U2" and "<@U1> 님이 기획서 속성 검사를 넘겼어요.\\n> 영웅 담당이라 넘겨요" in text
+    assert any(b["type"] == "actions" for b in sent["blocks"])
+    old = env.slack.updates[-1]
+    assert old["ts"] == "1.0" and "<@U2> 님에게 넘겼어요" in old["text"] and not any(b["type"] == "actions" for b in old["blocks"])
+
+    # 이제 새 담당자가 새 메세지에서 처리한다
+    property_slack.handle_apply(button(record, "property_apply", user="U1"), env.slack)
+    assert "담당자만" in env.slack.ephemerals[-1]["text"]
+    new_button = button(record, "property_apply", user="U2")
+    new_button["message"]["ts"] = "2.0"
+    property_slack.handle_apply(new_button, env.slack)
+    assert env.notion.writes[0][1]["담당자"] == {"people": [{"id": "N-U2"}]}
+
+
+def test_toss_to_someone_not_in_notion_leaves_the_owner_for_manual_entry(env, slack_people):
+    record = run()
+    property_slack.handle_toss(button(record, "property_toss"), env.slack)
+    toss_submit(env, "U3")
+    saved = property_check.get_record(PAGE_ID)
+    assert "owner" not in saved["proposal"]
+    assert "정하지 못한 항목은 노션에서 직접 채워 주세요: 담당자" in json.dumps(env.slack.posts[-1]["blocks"], ensure_ascii=False)
+
+
+def test_toss_keeps_the_owner_when_it_was_already_filled(env, slack_people):
+    env.notion.current = page(people=["N-SOMEONE"])
+    record = run()
+    property_slack.handle_toss(button(record, "property_toss"), env.slack)
+    toss_submit(env, "U2")
+    assert "owner" not in property_check.get_record(PAGE_ID)["proposal"]
+
+
+def test_toss_ends_the_old_chat_thread_and_the_new_thread_continues(env, slack_people, librarian):
+    record = run()
+    property_slack.handle_chat(button(record, "property_chat"), env.slack)
+    property_slack.handle_chat_message(env.slack, thread_message("개요를 더 짧게 해 줘"))
+    property_slack.handle_toss(button(record, "property_toss"), env.slack)
+    toss_submit(env, "U2")
+    ended = [p for p in env.slack.posts if p.get("thread_ts") == "1.0"][-1]
+    assert "더 이상 쓰지 않아요" in ended["text"]
+    saved = property_check.get_record(PAGE_ID)
+    assert "chat_history" not in saved and saved["proposal"]["summary"]["value"] == "근접 영웅 디고리."  # 고친 값은 넘어간다
+    # 예전 스레드는 이제 일반 질문, 새 메세지의 스레드에서 새 담당자가 고친다
+    assert property_slack.handle_chat_message(env.slack, thread_message("바꿔 줘", user="U2")) is False
+    assert property_slack.handle_chat_message(env.slack, thread_message("바꿔 줘", user="U2", thread_ts=saved["slack_ts"]))
+    assert "기획자: 개요를 더 짧게 해 줘" not in librarian["requests"][-1]
+
+
+def test_toss_to_self_does_nothing(env, slack_people):
+    record = run()
+    property_slack.handle_toss(button(record, "property_toss"), env.slack)
+    toss_submit(env, "U1")
+    assert property_check.get_record(PAGE_ID)["assignee_id"] == "U1" and len(env.slack.posts) == 1
 
 
 # --- 동기화 연결 ---

@@ -155,6 +155,16 @@ def init_slack():
         ack()
         property_slack.handle_chat(body, client)
 
+    @slack_app.action("property_toss")
+    def handle_property_toss(ack, body, client):
+        ack()
+        property_slack.handle_toss(body, client)
+
+    @slack_app.view("property_toss_submit")
+    def handle_property_toss_submit(ack, body, client):
+        ack()
+        property_slack.handle_toss_submit(body, client)
+
     @slack_app.action("property_skip")
     def handle_property_skip(ack, body, client):
         ack()
