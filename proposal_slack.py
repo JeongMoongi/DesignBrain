@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import backlog
 import config
 import indexing
+import librarian_report
 import notion_writer
 import slack_service
 
@@ -303,7 +304,8 @@ def revise(record: Dict, message: str) -> Dict:
     history = "\n".join(f"{h['role']}: {h['text']}" for h in record.get("chat_history", [])[-CHAT_HISTORY_TURNS:]) or "(없음)"
     request = (f"[제안] {record['content']}\n[문제] {record.get('problem', '')}\n[지금 제안 내용]\n{record['proposal']}\n\n"
                f"[이 스레드의 이전 대화]\n{history}\n\n[기획자의 말]\n{message}")
-    data = review.parse_json(review.run_with_tools(REVISE_PROMPT, request, f"'{record['content']}' 대화로 고치기"))
+    data = review.parse_json(review.run_with_tools(REVISE_PROMPT, request, f"'{record['content']}' 대화로 고치기",
+                                                   librarian_report.REVISE))
     return {"reply": data.get("reply") or "고쳐 봤어요.", "proposal": (data.get("proposal") or "").strip(),
             "assumptions": data.get("assumptions", "")}
 

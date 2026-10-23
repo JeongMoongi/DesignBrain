@@ -40,6 +40,8 @@ DIAGNOSIS_REPORT_USER_ID = os.environ.get("DIAGNOSIS_REPORT_USER_ID") or QA_REPO
 # 사서(librarian.py)가 원본을 정리한 정리본과, 정리할 문서 작업 목록 (벡터 없음)
 REFINED_COLLECTION = "refined_docs"
 LIBRARIAN_JOB_COLLECTION = "librarian_jobs"
+# 사서가 모델을 쓴 기록 (작업별 토큰을 주간 요약에 보여준다, 벡터 없음)
+LIBRARIAN_USAGE_COLLECTION = "librarian_usage"
 REFINE_MODEL = os.environ.get("REFINE_MODEL", "gpt-6.1-sol")
 REFINE_REASONING_EFFORT = os.environ.get("REFINE_REASONING_EFFORT", "low")
 # 기획자가 '완료'한 문서를 검토해 충돌/누락/새 주제를 찾을 때의 추론 강도 (모델은 REFINE_MODEL)

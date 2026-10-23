@@ -57,7 +57,8 @@ def _connect_qdrant() -> QdrantClient:
                                                 (config.QA_LOG_COLLECTION, {}, ["answer_ts"]),
                                                 (config.DIAGNOSIS_COLLECTION, {}, []),
                                                 (config.REFINED_COLLECTION, text_vectors, ["page_id", "item", "sources[].page_id"]),
-                                                (config.LIBRARIAN_JOB_COLLECTION, {}, [])):
+                                                (config.LIBRARIAN_JOB_COLLECTION, {}, []),
+                                                (config.LIBRARIAN_USAGE_COLLECTION, {}, [])):
         if not client.collection_exists(collection):
             client.create_collection(collection_name=collection, vectors_config=vectors)
             logger.info("✨ [Qdrant] '%s' 컬렉션이 새로 생성되었습니다.", collection)

@@ -29,6 +29,7 @@ import clients
 import config
 import doc_diagnosis
 import indexing
+import librarian_report
 
 logger = logging.getLogger("librarian")
 
@@ -219,6 +220,7 @@ def refine_document(page_id: str, force: bool = False, dry_run: bool = False):
     refined, input_tokens, output_tokens = refine_text(title, path, bodies, items)
     logger.info("🧹 [사서] '%s' 정리 완료: 원본 %d자 → 정리본 %d자, 토큰 %d/%d, %.0f초",
                 title, sum(map(len, bodies)), len(refined), input_tokens, output_tokens, time.time() - started)
+    librarian_report.record_usage(librarian_report.REFINE, title, input_tokens, output_tokens)
     if dry_run:
         print(refined)
         return 0

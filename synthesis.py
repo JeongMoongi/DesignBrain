@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 import backlog
 import clients
 import config
+import librarian_report
 import notion_parser
 import review
 
@@ -62,7 +63,7 @@ def draft(job: Dict) -> Optional[Dict]:
     """종합 문서 초안을 써서 백로그 제안 형식(finding)으로 돌려준다. 모을 필요가 없으면 None"""
     request = (f"[요청 주제] {job['topic']}\n[요청 이유] {job.get('reason', '')}\n[기획자의 질문] {job.get('question', '')}\n"
                f"[@Brain이 참고한 문서] {', '.join(job.get('doc_names', [])) or '(없음)'}")
-    data = review.parse_json(review.run_with_tools(SYNTHESIS_PROMPT, request, f"'{job['topic']}' 종합"))
+    data = review.parse_json(review.run_with_tools(SYNTHESIS_PROMPT, request, f"'{job['topic']}' 종합", librarian_report.SYNTHESIS))
     if data.get("skip") or not data.get("proposal") or not data.get("new_doc_title"):
         logger.info("📚 [사서 종합] '%s' 초안을 만들지 않습니다: %s", job["topic"], data.get("skip", "형식 오류"))
         return None
@@ -111,6 +112,8 @@ def check_dependents(page_id: str) -> List[Dict]:
             model=config.REFINE_MODEL, instructions=UPDATE_PROMPT, reasoning={"effort": config.REFINE_REASONING_EFFORT},
             input=f"[지도 문서] {summary['new_doc_title']}\n{summary_text}\n\n[바뀐 문서]\n{source_text}\n\n"
                   f"[이미 낸 제안]\n{review.earlier_proposals(summary_page)}")
+        librarian_report.record_usage(librarian_report.MAP_UPDATE, summary["new_doc_title"],
+                                      *librarian_report.usage_tokens([response.usage]))
         data = review.parse_json(response.output_text or "")
         if not data.get("needs_update") or not data.get("title") or not data.get("proposal"):
             continue

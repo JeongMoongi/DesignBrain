@@ -4,6 +4,7 @@ import threading
 from datetime import datetime, timedelta
 import backlog
 import config
+import librarian_report
 import qa_log
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,14 @@ def send_weekly_report(client, now=None):
     until = now or datetime.now(backlog.KST)
     since = until - timedelta(days=7)
     text = qa_log.weekly_report(qa_log.entries(since, until), since, until)
+    try:
+        librarian = librarian_report.weekly_report(since, until)
+    except Exception as e:
+        # 사서 활동은 덧붙이는 부분이라 실패해도 질문 기록 요약은 보낸다
+        logger.warning("⚠️ [사서] 주간 활동 요약 실패: %s", e)
+        librarian = ""
+    if librarian:
+        text += "\n" + librarian
     client.chat_postMessage(channel=config.QA_REPORT_USER_ID, text=text)
     logger.info("📊 [질문 기록] 주간 요약을 보냈습니다.")
 

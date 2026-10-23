@@ -25,7 +25,7 @@ def store(local_db, monkeypatch):
 @pytest.fixture
 def librarian_fakes(store, monkeypatch):
     drafts, slack = [], FakeSlack()
-    monkeypatch.setattr(review, "run_with_tools", lambda instructions, request, label: drafts.append(request) or json.dumps(DRAFT, ensure_ascii=False))
+    monkeypatch.setattr(review, "run_with_tools", lambda instructions, request, label, task: drafts.append(request) or json.dumps(DRAFT, ensure_ascii=False))
     monkeypatch.setattr(review, "related_docs", lambda names: [d for d in DOCS if d["title"] in names])
     monkeypatch.setattr(synthesis, "page_creator", lambda page_id: f"N-{page_id}")
     monkeypatch.setattr(proposal_slack, "web_client", lambda: slack)
@@ -111,7 +111,8 @@ class FakeResponsesAPI:
 
     def create(self, **kwargs):
         self.requests.append(kwargs)
-        return type("Response", (), {"output_text": self.text})()
+        usage = type("Usage", (), {"input_tokens": 100, "output_tokens": 10})()
+        return type("Response", (), {"output_text": self.text, "usage": usage})()
 
 
 @pytest.fixture

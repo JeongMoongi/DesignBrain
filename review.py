@@ -9,6 +9,7 @@ import agent
 import backlog
 import clients
 import librarian
+import librarian_report
 import config
 
 logger = logging.getLogger(__name__)
@@ -99,8 +100,9 @@ def parse_findings(text: str) -> List[Dict]:
     return findings
 
 
-def run_with_tools(instructions: str, request: str, label: str) -> str:
-    """사서가 해석자와 같은 도구(정리본 검색/목록/읽기, 원본 읽기)로 자료를 찾아 가며 일하고, 마지막 출력 글을 돌려준다"""
+def run_with_tools(instructions: str, request: str, label: str, task: str) -> str:
+    """사서가 해석자와 같은 도구(정리본 검색/목록/읽기, 원본 읽기)로 자료를 찾아 가며 일하고, 마지막 출력 글을 돌려준다.
+    task는 토큰 기록에 남길 작업 이름 (librarian_report)"""
     state = agent.AgentState(None, config.REFINED_COLLECTION)
     options = {"model": config.REFINE_MODEL, "instructions": instructions, "tools": agent.TOOLS + [agent.READ_ORIGINAL_TOOL],
                "reasoning": {"effort": config.REVIEW_REASONING_EFFORT}}
@@ -117,15 +119,16 @@ def run_with_tools(instructions: str, request: str, label: str) -> str:
         response = openai_client.responses.create(previous_response_id=response.id, input=outputs,
                                                   **options, **({"tool_choice": "none"} if final_round else {}))
         usage.append(response.usage)
-    logger.info("🔎 [사서] %s: 도구 %d회, 토큰 %d/%d", label, len(state.calls),
-                sum(u.input_tokens for u in usage if u), sum(u.output_tokens for u in usage if u))
+    input_tokens, output_tokens = librarian_report.usage_tokens(usage)
+    logger.info("🔎 [사서] %s: 도구 %d회, 토큰 %d/%d", label, len(state.calls), input_tokens, output_tokens)
+    librarian_report.record_usage(task, label, input_tokens, output_tokens)
     return response.output_text or ""
 
 
 def review_document(page_id: str, title: str) -> List[Dict]:
     """문서를 검토해 제안 목록을 돌려준다. 다른 문서는 도구로 정리본을 찾아 읽는다."""
     request = f"[검토할 문서] {title}\n\n{refined_text(page_id)}\n\n[이미 낸 제안]\n{earlier_proposals(page_id)}"
-    findings = parse_findings(run_with_tools(REVIEW_PROMPT, request, f"'{title}' 검토"))
+    findings = parse_findings(run_with_tools(REVIEW_PROMPT, request, f"'{title}' 검토", librarian_report.REVIEW))
     logger.info("🔎 [사서 검토] '%s': 제안 %d건", title, len(findings))
     return findings
 
@@ -161,6 +164,8 @@ def recheck_open(page_id: str) -> List[Dict]:
     response = clients.get_openai().responses.create(
         model=config.REFINE_MODEL, instructions=RECHECK_PROMPT, reasoning={"effort": config.REFINE_REASONING_EFFORT},
         input=f"[갱신된 문서]\n{text}\n\n[제안]\n{listing}")
+    title = next((d["title"] for d in proposals[0].get("docs", []) if d.get("page_id") == page_id), page_id)
+    librarian_report.record_usage(librarian_report.RECHECK, title, *librarian_report.usage_tokens([response.usage]))
     closed = []
     for result in parse_json(response.output_text or "").get("results", []):
         status = RECHECK_STATUS.get(result.get("status"))

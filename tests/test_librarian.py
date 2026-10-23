@@ -153,3 +153,11 @@ def test_agent_reads_refined_documents_and_originals(originals, fake_openai):
     assert refined == "[문서: 아이템 > 맹세의 서]\n## 항목: 맹세의 서\n- 각인 A: 협공"
     original = agent.tool_read_original(state, "아이템", item="맹세의 서")
     assert original == "[원본: 아이템 > 맹세의 서]\n- 항목: [맹세의 서] ➔ 각인 A='협공'"
+
+
+def test_refining_records_token_usage(originals, fake_openai):
+    import librarian_report
+    fake_openai()
+    librarian.refine_document("P1")
+    usage = librarian_report.scroll_all(config.LIBRARIAN_USAGE_COLLECTION)
+    assert [(u["task"], u["title"], u["input_tokens"], u["output_tokens"]) for u in usage] == [("정리", "아이템", 100, 50)]
