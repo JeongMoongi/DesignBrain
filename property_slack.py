@@ -40,7 +40,7 @@ def actions_block_id(page_id: str) -> str:
 
 
 def message_blocks(record: Dict, missing: List[Dict], requester_found: bool = True) -> List[Dict]:
-    """경고, AI가 정한 값, 버튼"""
+    """경고, 사서가 정한 값, 버튼"""
     proposal = record["proposal"]
     empty = [m for m in missing if m["reason"] == EMPTY]
     head = [f"⚠️ {doc_link(record)} 문서에 비어 있는 속성이 있어요: *{', '.join(m['label'] for m in empty)}*"]
@@ -54,9 +54,9 @@ def message_blocks(record: Dict, missing: List[Dict], requester_found: bool = Tr
     unresolved = [m["label"] for m in empty if m["key"] not in proposal]
     if not proposal:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                       f"AI가 채울 값을 정하지 못했어요. 노션에서 직접 채워 주세요: {', '.join(unresolved)}"}})
+                       f"사서가 채울 값을 정하지 못했어요. 노션에서 직접 채워 주세요: {', '.join(unresolved)}"}})
         return blocks
-    text = f"💡 *AI 제안* — 적용하면 노션에 바로 입력돼요\n{proposal_lines(proposal)}"
+    text = f"💡 *사서 제안* — 적용하면 노션에 바로 입력돼요\n{proposal_lines(proposal)}"
     if unresolved:
         text += f"\n정하지 못한 항목은 노션에서 직접 채워 주세요: {', '.join(unresolved)}"
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": proposal_clip(text)}})
@@ -117,8 +117,9 @@ def close_message(record: Dict, status_text: str) -> None:
 
 
 # --- [버튼 처리] ---
-def authorize(client, channel_id: str, user_id: str, page_id: str) -> Optional[Dict]:
-    """처리할 수 있는 요청이면 기록, 아니면 본인에게만 안내하고 None"""
+def authorize(client, channel_id: str, user_id: str, page_id: str, ts: Optional[str] = None) -> Optional[Dict]:
+    """처리할 수 있는 요청이면 기록, 아니면 본인에게만 안내하고 None.
+    ts는 버튼이 달린 메세지. 비어 있는 항목이 바뀌어 새로 물었다면 예전 메세지의 버튼은 받지 않는다"""
     record = property_check.get_record(page_id)
     refusal = None
     if record is None:
@@ -127,6 +128,8 @@ def authorize(client, channel_id: str, user_id: str, page_id: str) -> Optional[D
         refusal = "이미 처리된 요청이에요."
     elif record.get("assignee_id") != user_id:
         refusal = "❌ 담당자만 처리할 수 있어요."
+    elif ts and record.get("slack_ts") and ts != record["slack_ts"]:
+        refusal = "이전 메세지예요. 가장 최근에 받은 메세지의 버튼을 눌러 주세요."
     if refusal:
         client.chat_postEphemeral(channel=channel_id, user=user_id, text=refusal)
         return None
@@ -172,14 +175,14 @@ def apply_and_report(client, record: Dict, proposal: Dict[str, Dict], user_id: s
 
 def handle_apply(body, client) -> None:
     user_id, channel_id, page_id = body["user"]["id"], body["channel"]["id"], body["actions"][0]["value"]
-    record = authorize(client, channel_id, user_id, page_id)
+    record = authorize(client, channel_id, user_id, page_id, body["message"]["ts"])
     if record:
         apply_and_report(client, record, record["proposal"], user_id, channel_id, body["message"]["ts"])
 
 
 def handle_skip(body, client) -> None:
     user_id, channel_id, page_id = body["user"]["id"], body["channel"]["id"], body["actions"][0]["value"]
-    record = authorize(client, channel_id, user_id, page_id)
+    record = authorize(client, channel_id, user_id, page_id, body["message"]["ts"])
     if not record:
         return
     property_check.close_record(page_id, SKIPPED, user_id)
@@ -215,7 +218,7 @@ def edit_view(record: Dict, metadata: Dict) -> Dict:
 
 def handle_edit(body, client) -> None:
     user_id, channel_id, page_id = body["user"]["id"], body["channel"]["id"], body["actions"][0]["value"]
-    record = authorize(client, channel_id, user_id, page_id)
+    record = authorize(client, channel_id, user_id, page_id, body["message"]["ts"])
     if record:
         client.views_open(trigger_id=body["trigger_id"], view=edit_view(
             record, {"page_id": page_id, "channel": channel_id, "ts": body["message"]["ts"]}))
@@ -240,6 +243,6 @@ def handle_edit_submit(body, client) -> None:
     view = body["view"]
     meta = json.loads(view["private_metadata"])
     user_id = body["user"]["id"]
-    record = authorize(client, meta["channel"], user_id, meta["page_id"])
+    record = authorize(client, meta["channel"], user_id, meta["page_id"], meta["ts"])
     if record:
         apply_and_report(client, record, edited_proposal(record, view["state"]["values"]), user_id, meta["channel"], meta["ts"])

@@ -44,9 +44,13 @@ PROPERTY_SUMMARY = os.environ.get("PROPERTY_SUMMARY", "기획서 개요")
 PROPERTY_STATUS = os.environ.get("PROPERTY_STATUS", "상태")
 PROPERTY_OWNER = os.environ.get("PROPERTY_OWNER", "담당자")
 PROPERTY_MODIFIED = os.environ.get("PROPERTY_MODIFIED", "마지막 수정")
+# 속성 검사를 할 기획서 DB의 ID (쉼표로 구분, 선택). 비워 두면 위 속성 열이 2개 이상 있는 DB를 기획서 DB로 본다
+PLANNING_DATABASE_IDS = [i.strip().replace("-", "").lower() for i in os.environ.get("PLANNING_DATABASE_IDS", "").split(",") if i.strip()]
 # 사서(librarian.py)가 원본을 정리한 정리본과, 정리할 문서 작업 목록 (벡터 없음)
 REFINED_COLLECTION = "refined_docs"
 LIBRARIAN_JOB_COLLECTION = "librarian_jobs"
+# 사서가 모델을 쓴 기록 (작업별 토큰을 주간 요약에 보여준다, 벡터 없음)
+LIBRARIAN_USAGE_COLLECTION = "librarian_usage"
 REFINE_MODEL = os.environ.get("REFINE_MODEL", "gpt-6.1-sol")
 REFINE_REASONING_EFFORT = os.environ.get("REFINE_REASONING_EFFORT", "low")
 # 기획자가 '완료'한 문서를 검토해 충돌/누락/새 주제를 찾을 때의 추론 강도 (모델은 REFINE_MODEL)

@@ -3,7 +3,8 @@
 
 - 검사 시점: 노션의 'DB 등록' 버튼(웹훅 /webhook/notion)으로 들어온 동기화만. 알림은 그 버튼을 누른 사람에게 간다.
   전체 재동기화(resync_all.py)나 사서 제안 승인 뒤의 재동기화는 검사하지 않는다.
-- 기획서 DB의 문서만 본다: 부모가 DB이고 그 DB에 개요/상태/담당자/마지막 수정일 열이 하나라도 있어야 한다. 아니면 건너뛴다.
+- 기획서 DB의 문서만 본다: 부모가 DB이고, PLANNING_DATABASE_IDS로 지정한 DB이거나 (지정이 없으면) 개요/상태/담당자/마지막 수정 열이
+  2개 이상 있는 DB여야 한다. 아니면 건너뛴다. '상태'나 '담당자'는 다른 DB에도 흔한 열이라 하나만으로는 기획서 DB로 보지 않는다.
 - 값은 AI가 짓는 것과 사실로 정하는 것을 나눈다.
     AI: 기획서 이름(제목이 비었을 때), 개요, 상태(DB의 선택지 중에서만)
     사실: 담당자(완료한 사람), 마지막 수정일(노션이 기록한 마지막 수정 시각)
@@ -70,9 +71,12 @@ def database_schema(page: Dict, token: str) -> Dict[str, Dict]:
     return (database or {}).get("properties", {})
 
 
-def is_planning_db(schema: Dict[str, Dict]) -> bool:
-    """개요/상태/담당자/마지막 수정일 열이 하나라도 있는 DB만 기획서 DB로 본다 (몹/아이템 같은 다른 DB의 항목은 검사하지 않는다)"""
-    return any(name in schema for name in property_names().values())
+def is_planning_db(page: Dict, schema: Dict[str, Dict]) -> bool:
+    """기획서 DB의 문서인지. PLANNING_DATABASE_IDS가 있으면 그 DB만, 없으면 개요/상태/담당자/마지막 수정 열이 2개 이상 있는 DB만
+    (몹/아이템 같은 다른 DB의 항목은 검사하지 않는다)"""
+    if config.PLANNING_DATABASE_IDS:
+        return (page.get("parent", {}).get("database_id") or "").replace("-", "").lower() in config.PLANNING_DATABASE_IDS
+    return sum(name in schema for name in property_names().values()) >= 2
 
 
 def title_property(schema: Dict[str, Dict]) -> Optional[str]:
@@ -219,7 +223,7 @@ def _run(doc_data: Dict, token: str, requested_by: Optional[str]) -> Optional[Di
     page_id = doc_data["page_id"]
     page = notion_parser.fetch_page(page_id, token)
     schema = database_schema(page, token) if page else {}
-    if not is_planning_db(schema):
+    if not is_planning_db(page or {}, schema):
         # 알림이 안 오는 이유를 운영 로그에서 찾을 수 있게 남긴다
         logger.info("ℹ️ [속성 검사] '%s' 건너뜀: %s", doc_data.get("title"),
                     "노션 문서를 읽지 못함" if not page else
@@ -252,5 +256,8 @@ def _run(doc_data: Dict, token: str, requested_by: Optional[str]) -> Optional[Di
     if not sent:
         return None
     record.update(sent)
+    if existing and existing["status"] == OPEN:
+        # 비어 있는 항목이 바뀌어 새로 물었다: 예전 메세지의 버튼은 없애서 헷갈리지 않게 한다
+        property_slack.close_message(existing, "🔄 비어 있는 항목이 바뀌어 새로 물어봤어요. 가장 최근 메세지에서 처리해 주세요.")
     save_record(record)
     return record

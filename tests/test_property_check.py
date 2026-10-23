@@ -162,6 +162,7 @@ def test_run_warns_the_requester_with_proposal_and_buttons(env):
     assert sent["channel"] == "U1"
     text = json.dumps(sent["blocks"], ensure_ascii=False)
     assert "⚠️" in text and "기획서 개요, 상태, 담당자, 마지막 수정" in text and "디고리는 근접 영웅이다." in text
+    assert "사서 제안" in text and "AI 제안" not in text
     actions = [b for b in sent["blocks"] if b["type"] == "actions"][0]
     assert [e["action_id"] for e in actions["elements"]] == ["property_apply", "property_edit", "property_skip"]
     assert property_check.get_record(PAGE_ID)["slack_ts"] == "1.0"
@@ -178,6 +179,19 @@ def test_asks_again_when_a_different_property_becomes_missing(env):
     env.notion.current = page(summary="개요", status="완료", people=["N1"])  # 마지막 수정만 비어 있다
     assert run() is not None
     assert len(env.slack.posts) == 2
+    # 예전 메세지의 버튼은 없애고, 기록은 새 메세지를 가리킨다
+    assert env.slack.updates[0]["ts"] == "1.0" and "새로 물어봤어요" in env.slack.updates[0]["text"]
+    assert not any(b["type"] == "actions" for b in env.slack.updates[0]["blocks"])
+    assert property_check.get_record(PAGE_ID)["slack_ts"] == "2.0"
+
+
+def test_button_of_a_replaced_message_is_refused(env):
+    first = run()
+    env.notion.current = page(summary="개요", status="완료", people=["N1"])
+    run()
+    property_slack.handle_apply(button(first, "property_apply"), env.slack)  # 예전 메세지(1.0)의 버튼
+    assert env.notion.writes == [] and "이전 메세지" in env.slack.ephemerals[0]["text"]
+    assert property_check.get_record(PAGE_ID)["status"] == "open"
 
 
 def test_complete_page_sends_nothing_and_closes_a_pending_question(env):
@@ -195,6 +209,27 @@ def test_pages_outside_a_planning_database_are_skipped(env):
     env.notion.schema = {"이름": {"type": "title"}, "유형": {"type": "select"}}  # 몹/아이템 같은 다른 DB
     assert run() is None
     assert env.slack.posts == []
+
+
+def test_one_shared_column_is_not_enough_to_be_a_planning_database(env):
+    # 상태만 있는 DB (몹/아이템 같은 다른 DB)
+    env.notion.schema = {"이름": {"type": "title"}, "상태": SCHEMA["상태"]}
+    env.notion.current = page()
+    env.notion.current["properties"] = {k: v for k, v in env.notion.current["properties"].items() if k in ("이름", "상태")}
+    assert run() is None and env.slack.posts == []
+    # 상태와 담당자 두 열이 있으면 기획서 DB로 본다
+    env.notion.schema = {"이름": {"type": "title"}, "상태": SCHEMA["상태"], "담당자": SCHEMA["담당자"]}
+    env.notion.current = page()
+    env.notion.current["properties"] = {k: v for k, v in env.notion.current["properties"].items() if k in ("이름", "상태", "담당자")}
+    assert run() is not None
+
+
+def test_planning_database_ids_setting_limits_the_check_to_those_databases(env, monkeypatch):
+    monkeypatch.setattr(config, "PLANNING_DATABASE_IDS", ["otherdb"])
+    assert run() is None and env.slack.posts == []
+    monkeypatch.setattr(config, "PLANNING_DATABASE_IDS", ["abcd1234"])
+    env.notion.current["parent"]["database_id"] = "ABCD-1234"  # 하이픈과 대소문자가 달라도 같은 ID
+    assert run() is not None
 
 
 def test_requester_not_found_in_slack_goes_to_the_fallback_assignee(env, monkeypatch):

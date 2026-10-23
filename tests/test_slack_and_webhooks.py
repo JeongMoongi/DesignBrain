@@ -114,6 +114,75 @@ def test_answer_is_sent_even_if_attaching_images_fails(answer_with_images):
                               "metadata": slack_service.answer_metadata(["P1"], [])}]
 
 
+def test_split_for_slack_keeps_short_answer_whole():
+    assert slack_service.split_for_slack("짧은 답변\n\n둘째 줄") == ["짧은 답변\n\n둘째 줄"]
+
+
+def test_split_for_slack_closes_and_reopens_code_block():
+    text = "\n".join(["# 제목", "```text"] + [f"줄 {i} " + "가" * 30 for i in range(100)] + ["```", "끝"])
+    chunks = slack_service.split_for_slack(text, limit=1000)
+    assert len(chunks) > 1
+    assert all(len(c.encode()) <= 1000 for c in chunks)
+    # 조각마다 코드 블록이 열고 닫혀 슬랙에서 그대로 보인다
+    assert all(c.count("```") % 2 == 0 for c in chunks)
+    assert chunks[1].startswith("```")
+    assert "\n".join(chunks).replace("```\n```\n", "") == text
+
+
+def test_split_for_slack_cuts_a_very_long_line():
+    chunks = slack_service.split_for_slack("가" * 1000, limit=300)
+    assert all(len(c.encode()) <= 300 for c in chunks)
+    assert "".join(chunks) == "가" * 1000
+
+
+class LongAnswerSlack(AnswerSlack):
+    def __init__(self):
+        super().__init__()
+        self.posts = []
+
+    def chat_postMessage(self, **kwargs):
+        self.posts.append(kwargs)
+        return {"ts": f"5{len(self.posts)}"}
+
+
+def test_long_answer_continues_in_thread(monkeypatch):
+    # 4,000바이트가 넘는 답변으로 '분석 중' 메세지를 고치면 슬랙이 거부하므로 나눠 보낸다
+    answer = "\n\n".join(f"## {i}절\n" + "외부 이동 저항 설명 " * 20 for i in range(10))
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h, on_progress=None: {
+        "status": "success", "AI_답변": answer, "page_ids": ["P1"], "images": []})
+    slack = LongAnswerSlack()
+    run_reply(slack)
+    sent = [slack.updates[-1]] + slack.posts
+    assert len(sent) > 1 and all(len(m["text"].encode()) <= slack_service.SLACK_TEXT_BYTES for m in sent)
+    assert slack.updates[-1]["ts"] == "4"
+    assert all(p["thread_ts"] == "1" and p["metadata"] == slack_service.answer_metadata(["P1"], []) for p in slack.posts)
+    assert "\n".join(m["text"] for m in sent).replace("\n\n", "\n") == answer.strip().replace("\n\n", "\n")
+
+
+def test_exported_markdown_is_uploaded_raw_to_thread(monkeypatch):
+    document = "# 설계안\n\n**굵게** 그대로, [링크](https://notion.so/a)도 그대로"
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h, on_progress=None: {
+        "status": "success", "AI_답변": "**정리했어요**", "page_ids": [], "images": [],
+        "exports": [{"title": "외부 이동: 저항/설계안?", "content": document}]})
+    slack = LongAnswerSlack()
+    run_reply(slack)
+    assert slack.updates[-1]["text"] == "*정리했어요*"
+    # 슬랙 서식으로 바꾸지 않은 원문을 답변 스레드에 파일로 올린다
+    assert slack.uploads == [{"channel": "D1", "thread_ts": "1", "content": document,
+                              "filename": "외부 이동 저항 설계안.md", "title": "외부 이동 저항 설계안.md"}]
+
+
+def test_failed_markdown_upload_is_reported_in_thread(monkeypatch):
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h, on_progress=None: {
+        "status": "success", "AI_답변": "정리했어요", "page_ids": [], "images": [],
+        "exports": [{"title": "설계안", "content": "# 설계안"}]})
+    slack = LongAnswerSlack()
+    slack.files_upload_v2 = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("no scope"))
+    run_reply(slack)
+    assert slack.updates[-1]["text"] == "정리했어요"
+    assert slack.posts[-1]["text"].startswith("❌ 마크다운 파일을 첨부하지 못했어요.")
+
+
 def test_thread_say_posts_directly_without_metadata():
     # Bolt의 say는 스레드 첫 봇 답변의 메타데이터(도판 기록)를 어시스턴트 정보로 읽다 실패하므로 직접 보낸다
     posted = []
@@ -154,6 +223,24 @@ def test_history_excludes_current_and_later_messages(monkeypatch):
     assert received["query"] == "패턴은?"
     assert received["history"] == [{"role": "user", "content": "석화체 알려줘"},
                                    {"role": "assistant", "content": "석화체 설명"}]
+
+
+def test_history_reads_librarian_proposal_from_blocks(monkeypatch):
+    # 사서 제안 메세지는 본문(text)에 제목만 있고 문제·제안 내용은 블록에 있다
+    import proposal_slack
+    record = {"backlog_id": "b1", "proposal_type": "decision", "content": "결정이 필요함: 게이트 활성화 범위",
+              "problem": "다음 노드 게이트만 열리는지 불명확", "proposal": "사용 가능한 게이트에만 적용한다", "docs": []}
+    received = ask_recorder(monkeypatch)
+    slack = HistorySlack([{"ts": "1", "bot_id": "B", "text": "🧹 게이트 을(를) 정리하면서 확인이 필요한 것 1건을 찾았어요."},
+                          {"ts": "2", "bot_id": "B", "text": record["content"], "blocks": proposal_slack.item_blocks(record)},
+                          # 일반 텍스트 메세지에 슬랙이 붙이는 rich_text 블록은 본문을 그대로 쓴다
+                          {"ts": "3", "bot_id": "B", "text": "이전 답변", "blocks": [{"type": "rich_text", "elements": []}]},
+                          {"ts": "4", "user": "U", "text": "이게 무슨 뜻이야?"}])
+    slack_service.process_chat_and_reply(slack, lambda text, thread_ts=None: {"ts": "9"}, "D1", "1", "4", "이게 무슨 뜻이야?")
+    proposal = received["history"][1]["content"]
+    assert "다음 노드 게이트만 열리는지 불명확" in proposal and "💡 *사서 제안*" in proposal
+    assert "사용 가능한 게이트에만 적용한다" in proposal
+    assert received["history"][2] == {"role": "assistant", "content": "이전 답변"}
 
 
 def test_bare_mention_asks_last_question_again(monkeypatch):
