@@ -5,6 +5,7 @@ import logging
 from typing import Callable, Dict, List
 from qdrant_client.models import Filter, FieldCondition, MatchAny, MatchValue
 import ai_engine
+import backlog
 import clients
 import config
 import notion_parser
@@ -144,6 +145,18 @@ def chunk_body(payload) -> str:
 def document_names(collection: str = None) -> Dict[str, str]:
     """page_id → 문서 이름 (list_docs/read_document에서 쓰는 이름. 같은 제목이 여러 곳에 있으면 상위 이름이 붙는다)"""
     return {page_id: name for name, doc in search.get_documents(collection).items() for page_id in doc["page_ids"]}
+
+
+def linked_documents_note(query: str, collection: str = None) -> str:
+    """질문에 붙은 노션 링크가 어느 기획서인지 알려 주는 안내 (모델은 링크의 ID만 보고는 문서를 알 수 없다). 링크가 없으면 빈 문자열"""
+    page_ids = backlog.page_ids_in_text(query)
+    if not page_ids:
+        return ""
+    names = document_names(collection)
+    lines = [f"- {names[p]}: read_document로 읽어라" if p in names else
+             f"- 기획서 목록에 없는 문서 ({p}): 아직 등록되지 않아 읽을 수 없다. 노션에서 '완료'를 눌러 등록하면 읽을 수 있다고 안내하라"
+             for p in page_ids]
+    return "\n\n[질문에 붙은 노션 링크]\n" + "\n".join(lines)
 
 
 def tool_search_docs(state: AgentState, query: str) -> str:
@@ -298,7 +311,8 @@ def ask_agent(query: str, chat_history: List[Dict[str, str]], progress: Dict[str
                "reasoning": {"effort": config.AGENT_REASONING_EFFORT}}
     history = [{"role": h.get("role", "user"), "content": h.get("content", "")}
                for h in chat_history[-ai_engine.ANSWER_HISTORY_TURNS:]]
-    response = openai_client.responses.create(input=history + [{"role": "user", "content": query}], **options)
+    question = query + linked_documents_note(query, state.collection)
+    response = openai_client.responses.create(input=history + [{"role": "user", "content": question}], **options)
     usage = [response.usage]
 
     for round_no in range(1, config.AGENT_MAX_TOOL_ROUNDS + 1):

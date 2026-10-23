@@ -131,6 +131,27 @@ def test_agent_exports_markdown_file(docs, fake_responses):
     assert "export_markdown" in [t["name"] for t in fake.requests[0]["tools"]]
 
 
+def test_notion_link_in_question_is_named_for_the_model(docs, fake_responses):
+    # 슬랙은 링크를 <url|표시 글자>로 보낸다. P1은 인덱스에 있는 '아이템', 다른 하나는 등록되지 않은 문서
+    known, unknown = "11111111111111111111111111111111", "22222222222222222222222222222222"
+    docs.set_payload(config.COLLECTION_NAME, {"page_id": "11111111-1111-1111-1111-111111111111"},
+                     points=[p.id for p in docs.scroll(config.COLLECTION_NAME, limit=10)[0] if p.payload["page_id"] == "P1"])
+    question = (f"<https://app.notion.com/p/team/{known}?source=copy_link|app.notion.com/p/…> 이 페이지 부족한 점 있어? "
+                f"<https://www.notion.so/{unknown}|링크>도 봐줘")
+    fake = fake_responses(response(text="검토했어요\n사용한 문서: 없음"))
+    agent.ask_agent(question, [], {}, None)
+    sent = fake.requests[0]["input"][-1]["content"]
+    assert sent.startswith(question)
+    assert "- 아이템: read_document로 읽어라" in sent
+    assert "기획서 목록에 없는 문서 (22222222-2222-2222-2222-222222222222)" in sent
+
+
+def test_question_without_notion_link_is_sent_as_is(docs, fake_responses):
+    fake = fake_responses(response(text="답\n사용한 문서: 없음"))
+    agent.ask_agent("아이템 알려줘", [], {}, None)
+    assert fake.requests[0]["input"][-1]["content"] == "아이템 알려줘"
+
+
 def test_agent_stops_tools_after_max_rounds(docs, fake_responses, monkeypatch):
     monkeypatch.setattr(config, "AGENT_MAX_TOOL_ROUNDS", 2)
     fake = fake_responses(response([call("list_docs")]), response([call("list_docs")]),
