@@ -231,6 +231,26 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
     for part in rest:
         client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=part,
                                 metadata=answer_metadata(page_ids, []))
+    for export in res.get("exports", []):
+        share_markdown(client, channel_id, thread_ts, export)
+
+def markdown_filename(title):
+    """파일 이름에 쓸 수 없는 글자를 빼고 .md를 붙인다"""
+    name = re.sub(r'[\\/:*?"<>|\s]+', " ", title).strip(" .")[:80].strip()
+    return f"{name or '문서'}.md"
+
+def share_markdown(client, channel_id, thread_ts, export):
+    """에이전트가 만든 마크다운 문서를 슬랙 서식으로 바꾸지 않고 파일 그대로 스레드에 올린다 (노션에 붙여넣거나 가져오기용)"""
+    filename = markdown_filename(export["title"])
+    try:
+        client.files_upload_v2(channel=channel_id, thread_ts=thread_ts, content=export["content"],
+                               filename=filename, title=filename)
+        logger.info("📎 [Slack] 마크다운 파일 첨부: %s (%d자)", filename, len(export["content"]))
+    except Exception as e:
+        logger.exception("🚨 [Slack] 마크다운 파일 첨부 실패: %s", filename)
+        failure = ai_engine.describe_failure(e)
+        client.chat_postMessage(channel=channel_id, thread_ts=thread_ts,
+                                text=f"❌ 마크다운 파일을 첨부하지 못했어요.\n• *원인:* {failure['reason']}\n{failure['hint']}")
 
 # 슬랙은 약 4,000바이트가 넘는 메세지 수정(chat.update)을 SlackApiError로 거부한다 (한글은 글자당 3바이트)
 SLACK_TEXT_BYTES = 3500

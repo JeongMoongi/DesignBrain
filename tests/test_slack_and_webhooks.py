@@ -159,6 +159,30 @@ def test_long_answer_continues_in_thread(monkeypatch):
     assert "\n".join(m["text"] for m in sent).replace("\n\n", "\n") == answer.strip().replace("\n\n", "\n")
 
 
+def test_exported_markdown_is_uploaded_raw_to_thread(monkeypatch):
+    document = "# 설계안\n\n**굵게** 그대로, [링크](https://notion.so/a)도 그대로"
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h, on_progress=None: {
+        "status": "success", "AI_답변": "**정리했어요**", "page_ids": [], "images": [],
+        "exports": [{"title": "외부 이동: 저항/설계안?", "content": document}]})
+    slack = LongAnswerSlack()
+    run_reply(slack)
+    assert slack.updates[-1]["text"] == "*정리했어요*"
+    # 슬랙 서식으로 바꾸지 않은 원문을 답변 스레드에 파일로 올린다
+    assert slack.uploads == [{"channel": "D1", "thread_ts": "1", "content": document,
+                              "filename": "외부 이동 저항 설계안.md", "title": "외부 이동 저항 설계안.md"}]
+
+
+def test_failed_markdown_upload_is_reported_in_thread(monkeypatch):
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h, on_progress=None: {
+        "status": "success", "AI_답변": "정리했어요", "page_ids": [], "images": [],
+        "exports": [{"title": "설계안", "content": "# 설계안"}]})
+    slack = LongAnswerSlack()
+    slack.files_upload_v2 = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("no scope"))
+    run_reply(slack)
+    assert slack.updates[-1]["text"] == "정리했어요"
+    assert slack.posts[-1]["text"].startswith("❌ 마크다운 파일을 첨부하지 못했어요.")
+
+
 def test_thread_say_posts_directly_without_metadata():
     # Bolt의 say는 스레드 첫 봇 답변의 메타데이터(도판 기록)를 어시스턴트 정보로 읽다 실패하므로 직접 보낸다
     posted = []

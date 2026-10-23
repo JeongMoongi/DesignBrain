@@ -120,6 +120,17 @@ def test_agent_summary_request_is_noted_in_answer(docs, fake_responses):
     assert [j["question"] for j in librarian.pending_jobs()] == ["각인 다 알려줘"]
 
 
+def test_agent_exports_markdown_file(docs, fake_responses):
+    document = "# 외부 이동 저항\n\n| 구분 | 적용 |\n|---|---|\n| 외부 이동 | 적용 |"
+    fake = fake_responses(
+        response([call("export_markdown", title="외부 이동 저항", content=document)], id="r1"),
+        response(text="설계안을 문서로 정리했어요.\n사용한 문서: 없음", id="r2"))
+    result = agent.ask_agent("노션에 옮길 마크다운 문서 뽑아줘", [], {}, None)
+    assert result["exports"] == [{"title": "외부 이동 저항", "content": document}]
+    assert result["AI_답변"] == f"설계안을 문서로 정리했어요.\n\n{agent.EXPORTED_NOTE}"
+    assert "export_markdown" in [t["name"] for t in fake.requests[0]["tools"]]
+
+
 def test_agent_stops_tools_after_max_rounds(docs, fake_responses, monkeypatch):
     monkeypatch.setattr(config, "AGENT_MAX_TOOL_ROUNDS", 2)
     fake = fake_responses(response([call("list_docs")]), response([call("list_docs")]),
