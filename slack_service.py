@@ -216,16 +216,50 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
     page_ids = res.get("page_ids", [])
     sent.update(status="success", search_query=res.get("search_query"), used_docs=res.get("used_docs", []),
                 answer=formatted_answer, image_count=len(file_ids))
+    # 긴 답변은 첫 조각만 '분석 중' 메세지에 넣고(도판과 👍/👎는 여기에) 나머지는 스레드에 이어 보낸다
+    first, *rest = split_for_slack(formatted_answer)
     try:
-        client.chat_update(channel=channel_id, ts=placeholder_ts, text=formatted_answer,
+        client.chat_update(channel=channel_id, ts=placeholder_ts, text=first,
                            file_ids=file_ids or None, metadata=answer_metadata(page_ids, block_ids))
     except Exception as e:
         if not file_ids:
             raise
         # 도판 때문에 실패했더라도 답변은 전달한다
         logger.error("🚨 [Slack] 도판을 붙인 답변 전송 실패, 답변만 보냅니다: %s", e)
-        client.chat_update(channel=channel_id, ts=placeholder_ts, text=formatted_answer,
+        client.chat_update(channel=channel_id, ts=placeholder_ts, text=first,
                            metadata=answer_metadata(page_ids, []))
+    for part in rest:
+        client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=part,
+                                metadata=answer_metadata(page_ids, []))
+
+# 슬랙은 약 4,000바이트가 넘는 메세지 수정(chat.update)을 SlackApiError로 거부한다 (한글은 글자당 3바이트)
+SLACK_TEXT_BYTES = 3500
+CODE_FENCE = "```"
+
+def split_for_slack(text, limit=SLACK_TEXT_BYTES):
+    """답변을 limit바이트 이하 조각으로 줄 단위로 나눈다. 코드 블록 안에서 나뉘면 앞 조각에서 닫고 다음 조각에서 다시 연다."""
+    reserve = len(CODE_FENCE) + 1
+    lines = []
+    for line in text.split("\n"):
+        # 한 줄이 너무 길면 글자 단위로 자른다
+        while len(line.encode()) > limit - 2 * reserve:
+            cut = len(line.encode()[:limit - 2 * reserve].decode(errors="ignore"))
+            lines.append(line[:cut])
+            line = line[cut:]
+        lines.append(line)
+
+    chunks, current, size, in_code = [], [], 0, False
+    for line in lines:
+        line_size = len(line.encode()) + 1
+        if current and size + line_size > limit - reserve:
+            chunks.append("\n".join(current + [CODE_FENCE] if in_code else current).strip("\n"))
+            current, size = ([CODE_FENCE], reserve) if in_code else ([], 0)
+        current.append(line)
+        size += line_size
+        if line.lstrip().startswith(CODE_FENCE):
+            in_code = not in_code
+    chunks.append("\n".join(current).strip("\n"))
+    return [c for c in chunks if c.strip()] or [text]
 
 def upload_images(client, image_objs):
     """도판을 채널에 공유하지 않고 올려 두기만 한다 (답변 메세지에 붙인다). 올린 파일 ID와 노션 block_id 목록을 돌려준다."""

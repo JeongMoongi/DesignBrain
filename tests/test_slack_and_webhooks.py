@@ -114,6 +114,51 @@ def test_answer_is_sent_even_if_attaching_images_fails(answer_with_images):
                               "metadata": slack_service.answer_metadata(["P1"], [])}]
 
 
+def test_split_for_slack_keeps_short_answer_whole():
+    assert slack_service.split_for_slack("짧은 답변\n\n둘째 줄") == ["짧은 답변\n\n둘째 줄"]
+
+
+def test_split_for_slack_closes_and_reopens_code_block():
+    text = "\n".join(["# 제목", "```text"] + [f"줄 {i} " + "가" * 30 for i in range(100)] + ["```", "끝"])
+    chunks = slack_service.split_for_slack(text, limit=1000)
+    assert len(chunks) > 1
+    assert all(len(c.encode()) <= 1000 for c in chunks)
+    # 조각마다 코드 블록이 열고 닫혀 슬랙에서 그대로 보인다
+    assert all(c.count("```") % 2 == 0 for c in chunks)
+    assert chunks[1].startswith("```")
+    assert "\n".join(chunks).replace("```\n```\n", "") == text
+
+
+def test_split_for_slack_cuts_a_very_long_line():
+    chunks = slack_service.split_for_slack("가" * 1000, limit=300)
+    assert all(len(c.encode()) <= 300 for c in chunks)
+    assert "".join(chunks) == "가" * 1000
+
+
+class LongAnswerSlack(AnswerSlack):
+    def __init__(self):
+        super().__init__()
+        self.posts = []
+
+    def chat_postMessage(self, **kwargs):
+        self.posts.append(kwargs)
+        return {"ts": f"5{len(self.posts)}"}
+
+
+def test_long_answer_continues_in_thread(monkeypatch):
+    # 4,000바이트가 넘는 답변으로 '분석 중' 메세지를 고치면 슬랙이 거부하므로 나눠 보낸다
+    answer = "\n\n".join(f"## {i}절\n" + "외부 이동 저항 설명 " * 20 for i in range(10))
+    monkeypatch.setattr(ai_engine, "ask_ai_with_history", lambda q, h, on_progress=None: {
+        "status": "success", "AI_답변": answer, "page_ids": ["P1"], "images": []})
+    slack = LongAnswerSlack()
+    run_reply(slack)
+    sent = [slack.updates[-1]] + slack.posts
+    assert len(sent) > 1 and all(len(m["text"].encode()) <= slack_service.SLACK_TEXT_BYTES for m in sent)
+    assert slack.updates[-1]["ts"] == "4"
+    assert all(p["thread_ts"] == "1" and p["metadata"] == slack_service.answer_metadata(["P1"], []) for p in slack.posts)
+    assert "\n".join(m["text"] for m in sent).replace("\n\n", "\n") == answer.strip().replace("\n\n", "\n")
+
+
 def test_thread_say_posts_directly_without_metadata():
     # Bolt의 say는 스레드 첫 봇 답변의 메타데이터(도판 기록)를 어시스턴트 정보로 읽다 실패하므로 직접 보낸다
     posted = []
