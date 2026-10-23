@@ -155,6 +155,13 @@ def log_question(client, channel_id, thread_ts, message_ts, user_id, sent):
     except Exception as e:
         logger.warning("⚠️ [질문 기록] 저장 실패 (답변에는 영향 없음): %s", e)
 
+def message_text(msg):
+    """대화 기록에 쓸 메세지 글. 사서 제안처럼 내용을 섹션 블록에 담은 메세지는 본문에 제목만 있으므로 블록 글을 쓴다.
+    (일반 텍스트 메세지에 슬랙이 붙이는 rich_text 블록은 본문과 같으므로 보지 않는다)"""
+    sections = [b["text"]["text"] for b in msg.get("blocks") or []
+                if b.get("type") == "section" and (b.get("text") or {}).get("text")]
+    return "\n".join(sections) if sections else msg.get("text", "")
+
 def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text, sent):
     cleaned_query = re.sub(r'<@.*?>', '', raw_text).strip()
 
@@ -171,7 +178,7 @@ def _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_
             if float(msg.get("ts", 0)) >= float(message_ts):
                 continue
 
-            msg_text = re.sub(r'<@.*?>', '', msg.get("text", "")).strip()
+            msg_text = re.sub(r'<@.*?>', '', message_text(msg)).strip()
             # 답변을 기다리는 중인 다른 질문의 '분석 중' 메세지는 대화 내용이 아니다
             if not msg_text or is_placeholder(msg_text):
                 continue

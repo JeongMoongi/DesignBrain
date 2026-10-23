@@ -225,6 +225,24 @@ def test_history_excludes_current_and_later_messages(monkeypatch):
                                    {"role": "assistant", "content": "석화체 설명"}]
 
 
+def test_history_reads_librarian_proposal_from_blocks(monkeypatch):
+    # 사서 제안 메세지는 본문(text)에 제목만 있고 문제·제안 내용은 블록에 있다
+    import proposal_slack
+    record = {"backlog_id": "b1", "proposal_type": "decision", "content": "결정이 필요함: 게이트 활성화 범위",
+              "problem": "다음 노드 게이트만 열리는지 불명확", "proposal": "사용 가능한 게이트에만 적용한다", "docs": []}
+    received = ask_recorder(monkeypatch)
+    slack = HistorySlack([{"ts": "1", "bot_id": "B", "text": "🧹 게이트 을(를) 정리하면서 확인이 필요한 것 1건을 찾았어요."},
+                          {"ts": "2", "bot_id": "B", "text": record["content"], "blocks": proposal_slack.item_blocks(record)},
+                          # 일반 텍스트 메세지에 슬랙이 붙이는 rich_text 블록은 본문을 그대로 쓴다
+                          {"ts": "3", "bot_id": "B", "text": "이전 답변", "blocks": [{"type": "rich_text", "elements": []}]},
+                          {"ts": "4", "user": "U", "text": "이게 무슨 뜻이야?"}])
+    slack_service.process_chat_and_reply(slack, lambda text, thread_ts=None: {"ts": "9"}, "D1", "1", "4", "이게 무슨 뜻이야?")
+    proposal = received["history"][1]["content"]
+    assert "다음 노드 게이트만 열리는지 불명확" in proposal and "💡 *사서 제안*" in proposal
+    assert "사용 가능한 게이트에만 적용한다" in proposal
+    assert received["history"][2] == {"role": "assistant", "content": "이전 답변"}
+
+
 def test_bare_mention_asks_last_question_again(monkeypatch):
     received = ask_recorder(monkeypatch)
     slack = HistorySlack([{"ts": "1", "user": "U", "text": "석화체 알려줘"},
