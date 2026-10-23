@@ -164,7 +164,7 @@ def test_run_warns_the_requester_with_proposal_and_buttons(env):
     assert "⚠️" in text and "기획서 개요, 상태, 담당자, 마지막 수정" in text and "디고리는 근접 영웅이다." in text
     assert "사서 제안" in text and "AI 제안" not in text
     actions = [b for b in sent["blocks"] if b["type"] == "actions"][0]
-    assert [e["action_id"] for e in actions["elements"]] == ["property_apply", "property_edit", "property_skip"]
+    assert [e["action_id"] for e in actions["elements"]] == ["property_apply", "property_edit", "property_chat", "property_skip"]
     assert property_check.get_record(PAGE_ID)["slack_ts"] == "1.0"
 
 
@@ -363,6 +363,108 @@ def test_renaming_a_document_resyncs_it(env, monkeypatch):
     property_slack.handle_apply(button(record, "property_apply"), env.slack)
     assert env.notion.writes[0][1]["이름"]["title"][0]["text"]["content"] == "디고리 영웅"
     assert synced == [(PAGE_ID, None)]
+
+
+# --- 대화로 고치기 ---
+@pytest.fixture
+def librarian(monkeypatch):
+    """사서의 대답을 정해 두고, 받은 요청을 기록한다"""
+    import review
+    said = {"reply": {"reply": "개요를 줄였어요.", "values": {"summary": "근접 영웅 디고리."}}, "requests": []}
+
+    def run_with_tools(instructions, request, label, task):
+        said["requests"].append(request)
+        return json.dumps(said["reply"], ensure_ascii=False)
+
+    monkeypatch.setattr(review, "run_with_tools", run_with_tools)
+    return said
+
+
+def thread_message(text, user="U1", thread_ts="1.0"):
+    return {"channel": "D-U1", "user": user, "thread_ts": thread_ts, "ts": "9.0", "text": text}
+
+
+def test_chat_button_opens_the_conversation_in_the_message_thread(env):
+    record = run()
+    property_slack.handle_chat(button(record, "property_chat"), env.slack)
+    guide = env.slack.posts[-1]
+    assert guide["thread_ts"] == "1.0" and "고칠 점을 말해 주세요" in guide["text"]
+    property_slack.handle_chat(button(record, "property_chat"), env.slack)
+    assert len(env.slack.posts) == 2 and "이미 이 메세지의 스레드" in env.slack.ephemerals[0]["text"]
+
+
+def test_thread_reply_revises_the_value_and_updates_the_original_message(env, librarian):
+    record = run()
+    assert property_slack.handle_chat_message(env.slack, thread_message("개요를 더 짧게 해 줘"))
+    assert "개요를 더 짧게 해 줘" in librarian["requests"][0] and "디고리는 근접 영웅이다." in librarian["requests"][0]
+    assert property_check.get_record(PAGE_ID)["proposal"]["summary"]["value"] == "근접 영웅 디고리."
+    original, reply = env.slack.updates
+    # 원래 메세지를 고친 값으로 다시 그리고, 버튼은 그대로 둔다
+    assert original["ts"] == "1.0" and "근접 영웅 디고리." in json.dumps(original["blocks"], ensure_ascii=False)
+    assert any(b["type"] == "actions" for b in original["blocks"])
+    assert reply["ts"] == "2.0" and "개요를 줄였어요." in reply["text"]
+    # 적용하면 고친 값이 노션에 들어간다
+    property_slack.handle_apply(button(record, "property_apply"), env.slack)
+    assert env.notion.writes[0][1]["기획서 개요"]["rich_text"][0]["text"]["content"] == "근접 영웅 디고리."
+
+
+def test_conversation_history_is_passed_to_the_next_turn(env, librarian):
+    run()
+    property_slack.handle_chat_message(env.slack, thread_message("개요를 더 짧게 해 줘"))
+    property_slack.handle_chat_message(env.slack, thread_message("좋아, 상태는?"))
+    assert "기획자: 개요를 더 짧게 해 줘" in librarian["requests"][1] and "사서: 개요를 줄였어요." in librarian["requests"][1]
+
+
+def test_question_in_the_thread_changes_nothing(env, librarian):
+    run()
+    librarian["reply"] = {"reply": "본문의 첫 문단을 요약했어요.", "values": {}}
+    property_slack.handle_chat_message(env.slack, thread_message("개요는 어디서 가져온 거야?"))
+    assert property_check.get_record(PAGE_ID)["proposal"]["summary"]["value"] == "디고리는 근접 영웅이다."
+    assert len(env.slack.updates) == 1 and env.slack.updates[0]["text"] == "💬 본문의 첫 문단을 요약했어요."
+
+
+def test_chat_cannot_set_a_status_outside_the_options_or_change_facts(env, librarian):
+    run()
+    librarian["reply"] = {"reply": "바꿨어요.", "values": {"status": "아무 값", "owner": "N-OTHER", "modified": "2020-01-01"}}
+    property_slack.handle_chat_message(env.slack, thread_message("상태는 아무 값, 담당자는 다른 사람으로"))
+    proposal = property_check.get_record(PAGE_ID)["proposal"]
+    assert proposal["status"]["value"] == "작성 중" and proposal["owner"]["value"] == "N-REQ"
+    assert proposal["modified"]["value"] == "2026-10-24"
+
+
+def test_chat_can_fill_a_value_the_librarian_could_not_decide(env, librarian):
+    env.ai["reply"] = json.dumps({"summary": "디고리는 근접 영웅이다."})  # 상태는 정하지 못했다
+    record = run()
+    assert "status" not in record["proposal"]
+    librarian["reply"] = {"reply": "상태를 검토 중으로 정했어요.", "values": {"status": "검토 중"}}
+    property_slack.handle_chat_message(env.slack, thread_message("상태는 검토 중으로"))
+    assert "- status (상태): (정하지 못함)" in librarian["requests"][0]
+    property_slack.handle_apply(button(record, "property_apply"), env.slack)
+    assert env.notion.writes[0][1]["상태"] == {"status": {"name": "검토 중"}}
+
+
+def test_only_the_assignee_can_chat_and_only_while_open(env, librarian):
+    record = run()
+    assert property_slack.handle_chat_message(env.slack, thread_message("바꿔 줘", user="U2"))
+    assert env.slack.posts[-1]["text"] == "담당자만 고칠 수 있어요." and librarian["requests"] == []
+    property_slack.handle_skip(button(record, "property_skip"), env.slack)
+    assert property_slack.handle_chat_message(env.slack, thread_message("바꿔 줘"))
+    assert env.slack.posts[-1]["text"] == "이미 처리된 요청이에요." and librarian["requests"] == []
+
+
+def test_other_threads_are_left_to_normal_questions(env, librarian):
+    run()
+    assert property_slack.handle_chat_message(env.slack, thread_message("석화체 알려줘", thread_ts="77.0")) is False
+    assert property_slack.handle_chat_message(env.slack, {"channel": "D-U1", "user": "U1", "ts": "9.0", "text": "질문"}) is False
+
+
+def test_failed_revision_is_reported_and_keeps_the_proposal(env, monkeypatch):
+    import review
+    run()
+    monkeypatch.setattr(review, "run_with_tools", lambda *a: (_ for _ in ()).throw(RuntimeError("모델 오류")))
+    property_slack.handle_chat_message(env.slack, thread_message("바꿔 줘"))
+    assert env.slack.updates[-1]["text"].startswith("❌ 고치지 못했어요.")
+    assert property_check.get_record(PAGE_ID)["proposal"]["summary"]["value"] == "디고리는 근접 영웅이다."
 
 
 # --- 동기화 연결 ---

@@ -66,6 +66,9 @@ def init_slack():
             # 사서 제안을 대화로 고치는 스레드의 메세지는 질문이 아니라 고칠 지시다
             if proposal_slack.handle_chat_message(client, event):
                 return
+            # 속성 검사 메세지의 스레드도 마찬가지다
+            if property_slack.handle_chat_message(client, event):
+                return
             request_text = backlog_slack.backlog_request_text(user_text)
             if request_text is not None:
                 backlog_slack.handle_backlog_mention(client, say, event, request_text)
@@ -146,6 +149,11 @@ def init_slack():
     def handle_property_edit(ack, body, client):
         ack()
         property_slack.handle_edit(body, client)
+
+    @slack_app.action("property_chat")
+    def handle_property_chat(ack, body, client):
+        ack()
+        property_slack.handle_chat(body, client)
 
     @slack_app.action("property_skip")
     def handle_property_skip(ack, body, client):

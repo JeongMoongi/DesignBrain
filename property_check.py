@@ -8,6 +8,7 @@
 - 값은 AI가 짓는 것과 사실로 정하는 것을 나눈다.
     AI: 기획서 이름(제목이 비었을 때), 개요, 상태(DB의 선택지 중에서만)
     사실: 담당자(완료한 사람), 마지막 수정일(노션이 기록한 마지막 수정 시각)
+- AI가 짓는 항목은 묻는 메세지의 스레드에서 사서와 대화로 고칠 수 있다 (property_slack.py).
 - 같은 문서에 같은 항목이 비어 있는 동안에는 다시 묻지 않는다. 기록은 문서마다 하나 (PROPERTY_CHECK_COLLECTION).
 - 검사는 부가 기능이므로 실패해도 동기화 결과에는 영향을 주지 않는다 (run).
 """
@@ -15,7 +16,7 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
-from qdrant_client.models import PointStruct
+from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
 import backlog
 import clients
 import config
@@ -195,6 +196,21 @@ def get_record(page_id: str) -> Optional[Dict]:
     return points[0].payload if points else None
 
 
+def record_by_message(slack_ts: str) -> Optional[Dict]:
+    """묻는 메세지(ts)의 기록. 그 메세지 스레드의 답장을 '대화로 고치기'로 받을 때 쓴다"""
+    points = clients.get_qdrant().scroll(
+        collection_name=config.PROPERTY_CHECK_COLLECTION, limit=1, with_payload=True,
+        scroll_filter=Filter(must=[FieldCondition(key="slack_ts", match=MatchValue(value=slack_ts))]))[0]
+    return points[0].payload if points else None
+
+
+def missing_items(record: Dict) -> List[Dict]:
+    """기록에 남긴 비어 있는 항목. missing_items가 없는 예전 기록은 모두 비어 있는 항목으로 본다"""
+    if "missing_items" in record:
+        return record["missing_items"]
+    return [{"key": key, "label": label(key), "property": label(key), "reason": EMPTY} for key in record["missing"]]
+
+
 def save_record(record: Dict) -> None:
     clients.get_qdrant().upsert(collection_name=config.PROPERTY_CHECK_COLLECTION,
                                 points=[PointStruct(id=record_id(record["page_id"]), vector={}, payload=record)])
@@ -248,8 +264,9 @@ def _run(doc_data: Dict, token: str, requested_by: Optional[str]) -> Optional[Di
         return None
 
     proposal = build_proposal(page, doc_data, missing, schema, requested_by)
+    # missing_items는 대화로 고친 뒤 메세지를 다시 그릴 때 쓴다 (property_slack.py)
     record = {"page_id": page_id, "title": notion_parser.page_title(page) or "", "url": page.get("url", ""),
-              "missing": keys, "proposal": proposal, "status_options": status_options(schema), "status": OPEN,
+              "missing": keys, "missing_items": missing, "proposal": proposal, "status_options": status_options(schema), "status": OPEN,
               "notified_at": datetime.now(backlog.KST).isoformat()}
     import property_slack
     sent = property_slack.notify(record, missing, requested_by)
