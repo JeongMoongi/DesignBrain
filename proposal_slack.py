@@ -7,12 +7,12 @@
 import json
 import logging
 import threading
-from datetime import datetime
 from typing import Dict, List, Optional
 import backlog
 import config
 import indexing
 import librarian_report
+import librarian_slack
 import notion_writer
 import slack_service
 
@@ -276,8 +276,6 @@ REVISE_PROMPT = (
     "JSON만 출력한다: {\"reply\": \"기획자에게 할 말 (무엇을 바꿨는지 또는 질문에 대한 답) 2문장 이내\", "
     "\"proposal\": \"고친 제안 전체 (바꾸지 않았으면 빈 문자열)\", \"assumptions\": \"근거 없이 정한 부분 요약 (없으면 빈 문자열)\"}"
 )
-# 사서에게 함께 넘기는 이 스레드의 이전 대화 수
-CHAT_HISTORY_TURNS = 10
 
 
 def handle_chat(body, client) -> None:
@@ -301,9 +299,8 @@ def handle_chat(body, client) -> None:
 def revise(record: Dict, message: str) -> Dict:
     """사서가 기획자의 말에 따라 제안을 고친다. {"reply", "proposal", "assumptions"}"""
     import review
-    history = "\n".join(f"{h['role']}: {h['text']}" for h in record.get("chat_history", [])[-CHAT_HISTORY_TURNS:]) or "(없음)"
     request = (f"[제안] {record['content']}\n[문제] {record.get('problem', '')}\n[지금 제안 내용]\n{record['proposal']}\n\n"
-               f"[이 스레드의 이전 대화]\n{history}\n\n[기획자의 말]\n{message}")
+               f"[이 스레드의 이전 대화]\n{librarian_slack.history_text(record.get('chat_history', []))}\n\n[기획자의 말]\n{message}")
     data = review.parse_json(review.run_with_tools(REVISE_PROMPT, request, f"'{record['content']}' 대화로 고치기",
                                                    librarian_report.REVISE))
     return {"reply": data.get("reply") or "고쳐 봤어요.", "proposal": (data.get("proposal") or "").strip(),
@@ -323,24 +320,22 @@ def handle_chat_message(client, event) -> bool:
         client.chat_postMessage(channel=channel_id, thread_ts=thread_ts,
                                 text="이미 처리된 제안이에요." if record["status"] != backlog.OPEN else "담당자만 고칠 수 있어요.")
         return True
-    placeholder = client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text="🧹 사서가 고치는 중…")
-    try:
-        result = revise(record, event.get("text", ""))
-    except Exception as e:
-        logger.exception("🚨 [사서] 대화로 고치기 실패: %s", record["content"])
-        client.chat_update(channel=channel_id, ts=placeholder["ts"], text=f"❌ 고치지 못했어요. 다시 말해 주세요. ({type(e).__name__})")
+    message = event.get("text", "")
+    turn = librarian_slack.chat_turn(client, channel_id, thread_ts, record["content"], record.get("chat_history", []), message,
+                                     lambda: revise(record, message))
+    if turn is None:
         return True
-    history = record.get("chat_history", []) + [{"role": "기획자", "text": event.get("text", "")}, {"role": "사서", "text": result["reply"]}]
+    result, history, placeholder_ts = turn
     fields = {"chat_history": history}
     if result["proposal"]:
         fields.update(proposal=result["proposal"], assumptions=result["assumptions"])
     backlog.update(record["backlog_id"], **fields)
     record.update(fields)
     if result["proposal"]:
-        client.chat_update(channel=channel_id, ts=placeholder["ts"], text=result["reply"],
+        client.chat_update(channel=channel_id, ts=placeholder_ts, text=result["reply"],
                            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"✏️ {result['reply']}"}}] + item_blocks(record))
     else:
-        client.chat_update(channel=channel_id, ts=placeholder["ts"], text=f"💬 {result['reply']}")
+        client.chat_update(channel=channel_id, ts=placeholder_ts, text=f"💬 {result['reply']}")
     return True
 
 
@@ -351,27 +346,14 @@ def handle_toss(body, client) -> None:
     if refuse(client, channel_id, user_id, backlog.check_open(backlog_id, user_id)):
         return
     record = backlog.get(backlog_id)
-    client.views_open(trigger_id=body["trigger_id"], view={
-        "type": "modal", "callback_id": "proposal_toss_submit", "private_metadata": modal_metadata(body),
-        "title": {"type": "plain_text", "text": "토스"},
-        "submit": {"type": "plain_text", "text": "넘기기"}, "close": {"type": "plain_text", "text": "취소"},
-        "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": clip(f"*{record['content']}*", SECTION_CHARS)}},
-            {"type": "input", "block_id": "to", "label": {"type": "plain_text", "text": "넘길 사람"},
-             "element": {"type": "users_select", "action_id": "value"}},
-            {"type": "input", "block_id": "memo", "optional": True, "label": {"type": "plain_text", "text": "한마디"},
-             "element": {"type": "plain_text_input", "action_id": "value", "multiline": True,
-                         "placeholder": {"type": "plain_text", "text": "예: 전투 담당이 판단할 내용이라 넘겨요"}}}]})
+    client.views_open(trigger_id=body["trigger_id"], view=librarian_slack.toss_view(
+        "proposal_toss_submit", clip(f"*{record['content']}*", SECTION_CHARS), modal_metadata(body)))
 
 
 def handle_toss_submit(body, client) -> None:
     """담당자를 바꾸고, 새 담당자에게 제안을 보내고, 원래 메세지에 넘겼다고 남긴다.
     대화로 고치던 중이었으면 그 대화 기록은 넘어가고, 새 담당자는 자기 DM에서 새로 대화 스레드를 연다."""
-    view = body["view"]
-    meta = json.loads(view["private_metadata"])
-    values = view["state"]["values"]
-    to_user = values["to"]["value"].get("selected_user")
-    memo = (values["memo"]["value"].get("value") or "").strip()
+    meta, to_user, memo = librarian_slack.toss_input(body["view"])
     user_id = body["user"]["id"]
     if not to_user or to_user == user_id or refuse(client, meta["channel"], user_id, backlog.check_open(meta["backlog_id"], user_id)):
         return
@@ -379,14 +361,13 @@ def handle_toss_submit(body, client) -> None:
     if record.get("chat_ts"):
         client.chat_postMessage(channel=meta["channel"], thread_ts=record["chat_ts"],
                                 text=f"🔁 <@{to_user}> 님에게 넘겼어요. 이 스레드는 더 이상 쓰지 않아요.")
-    tosses = record.get("toss_history", []) + [{"from": user_id, "to": to_user, "memo": memo,
-                                                "at": datetime.now(backlog.KST).isoformat(timespec="seconds")}]
-    fields = {"assignee_id": to_user, "assignee_name": user_name(client, to_user), "chat_ts": "", "toss_history": tosses}
+    fields = {"assignee_id": to_user, "assignee_name": user_name(client, to_user), "chat_ts": "",
+              "toss_history": librarian_slack.toss_history(record, user_id, to_user, memo)}
     backlog.update(record["backlog_id"], **fields)
     record.update(fields)
 
     head = client.chat_postMessage(channel=to_user, text=(
-        f"🔁 <@{user_id}> 님이 사서 제안을 넘겼어요." + (f"\n> {memo}" if memo else "")
+        librarian_slack.toss_notice(user_id, "사서 제안을", memo)
         + "\n스레드에서 처리해 주세요. 담당이 아니면 다시 [🔁 토스]로 넘길 수 있어요."))
     sent = client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
     backlog.update(record["backlog_id"], slack_channel=sent["channel"], slack_ts=sent["ts"])
