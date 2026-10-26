@@ -11,6 +11,7 @@ import doc_diagnosis
 import config
 import notion_parser
 import property_check
+import risk_notice
 import search
 
 logger = logging.getLogger(__name__)
@@ -202,6 +203,8 @@ def _sync_document(page_id: str, notion_token: str, requested_by: str = None, ch
     # 전체 재동기화나 사서 제안 승인 뒤의 재동기화는 검사하지 않는다 (사람이 누르지 않은 알림을 막기 위함)
     if check_properties:
         property_check.run(doc_data, notion_token, requested_by)
+        # 같은 'DB 등록'에서 QA 담당자에게 더 세심히 볼 영역을 DM으로 알린다 (별도 스레드, 받을 사람이 설정돼 있을 때만)
+        risk_notice.notify_async(doc_data)
     try:
         librarian.enqueue(page_id, requested_by)
     except Exception as e:
