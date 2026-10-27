@@ -70,5 +70,11 @@ AGENT_REASONING_EFFORT = os.environ.get("AGENT_REASONING_EFFORT", "medium")
 AGENT_MAX_TOOL_ROUNDS = 8
 # 해석자가 읽는 자료: original = 원본 청크, refined = 사서의 정리본 (원본은 read_original 도구로 연다)
 AGENT_SOURCE = os.environ.get("AGENT_SOURCE", "original")
+# 'DB 등록'한 기획서에서 QA가 더 세심히 볼 영역을 DM으로 알려 줄 사람의 슬랙 ID (쉼표로 구분, 사용자 ID나 채널 ID). 비어 있으면 알리지 않는다 (risk_notice.py)
+TEST_NOTIFY_IDS = [i.strip() for i in os.environ.get("TEST_NOTIFY_IDS", "").split(",") if i.strip()]
+# 이미 알린 문서는 줄(문단)의 이 비율 이상이 바뀌었을 때만 다시 알린다 (0.3 = 30%)
+TEST_NOTICE_CHANGE_RATIO = float(os.environ.get("TEST_NOTICE_CHANGE_RATIO", "0.3"))
+# 문서마다 마지막으로 알린 본문의 줄 지문 (벡터 없음)
+TEST_NOTICE_COLLECTION = "test_notices"
 # 에이전트가 흩어진 정보의 종합 문서를 사서에게 요청하면 실제로 작업 목록에 올린다 (평가 실행에서는 끄고 기록만 한다)
 SYNTHESIS_REQUESTS = True

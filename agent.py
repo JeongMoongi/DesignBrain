@@ -9,6 +9,7 @@ import backlog
 import clients
 import config
 import notion_parser
+import qa_lens
 import search
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,8 @@ SYSTEM_PROMPT = (
     f"- 답변의 맨 마지막 줄에는 '{ai_engine.USED_DOCS_LABEL} 제목1 | 제목2' 형식으로, 답변에 실제로 사용한 문서의 제목만 적어라. "
     f"사용한 문서가 없으면 '{ai_engine.USED_DOCS_LABEL} 없음'이라고 적어라."
 )
+# QA 담당자의 'QA 할건데 뭘 볼까?' 같은 질문에 가볍게 답하는 규칙 (qa_lens.py)
+SYSTEM_PROMPT += qa_lens.QA_PROMPT
 # 정리본을 읽을 때 덧붙이는 안내 (config.AGENT_SOURCE == "refined")
 REFINED_PROMPT = (
     "\n\n[자료에 대해]\n"

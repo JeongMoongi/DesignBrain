@@ -57,6 +57,7 @@ def _connect_qdrant() -> QdrantClient:
                                                 (config.QA_LOG_COLLECTION, {}, ["answer_ts"]),
                                                 (config.DIAGNOSIS_COLLECTION, {}, []),
                                                 (config.PROPERTY_CHECK_COLLECTION, {}, ["slack_ts"]),
+                                                (config.TEST_NOTICE_COLLECTION, {}, []),
                                                 (config.REFINED_COLLECTION, text_vectors, ["page_id", "item", "sources[].page_id"]),
                                                 (config.LIBRARIAN_JOB_COLLECTION, {}, []),
                                                 (config.LIBRARIAN_USAGE_COLLECTION, {}, [])):
