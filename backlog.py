@@ -27,6 +27,8 @@ UNSETTLED = [OPEN, HELD]
 PROPOSAL = "proposal"
 # 제안 종류: 원본 문서의 결정 기록에 덧붙일 결정 / 새로 만들 문서
 DECISION, WRITING = "decision", "writing"
+# 무엇을 찾았나: 문서끼리 어긋남 / 비어 있음 / 흩어진 주제 (슬랙 한 줄 요약의 아이콘)
+CONFLICT, MISSING, TOPIC = "conflict", "missing", "topic"
 
 # 답변에 붙일 백로그 선택 기준 (질문 벡터와 백로그 내용의 코사인 유사도).
 # 실측(2026-10-13): 관련 질문 0.40~0.54, 같은 기획서의 무관한 질문 0.27, 다른 주제 0.10~0.21
@@ -229,7 +231,7 @@ def close(backlog_id: str, user_id: str, status: str, **fields) -> None:
 def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, str]],
                  assignee_id: Optional[str], assignee_name: Optional[str], review_id: str) -> Dict:
     """사서 검토에서 나온 제안 하나를 저장한다. target은 검토한 문서 {"page_id", "title", "url"}.
-    finding: {"type": decision|writing, "title", "problem", "proposal", "new_doc_title"}"""
+    finding: {"type": decision|writing, "title", "summary", "category", "problem", "proposal", "new_doc_title"}"""
     backlog_id = str(uuid.uuid4())
     title = finding["title"]
     record = {
@@ -237,6 +239,9 @@ def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, 
         "kind": PROPOSAL,
         "proposal_type": finding["type"],
         "content": title,
+        # 슬랙에서 맨 위에 보이는 한 줄 요약과 그 종류 (예전 제안에는 없어 제목을 대신 보여준다)
+        "summary": finding.get("summary", ""),
+        "category": finding.get("category", ""),
         "problem": finding.get("problem", ""),
         "proposal": finding.get("proposal", ""),
         # 사서가 근거 없이 새로 정한 부분 (승인 전에 확인하도록 슬랙에 따로 보여준다)

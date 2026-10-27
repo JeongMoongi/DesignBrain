@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 SECTION_CHARS = 2800
 INPUT_CHARS = 3000
 TYPE_LABELS = {backlog.DECISION: "결정 기록에 추가", backlog.WRITING: "새 문서로 작성"}
+CATEGORY_ICONS = {backlog.CONFLICT: "🔀", backlog.MISSING: "🕳️", backlog.TOPIC: "📚"}
 
 
 def web_client():
@@ -79,12 +80,20 @@ def doc_links(docs: List[Dict]) -> str:
     return ", ".join(f"<{d['url']}|{d['title']}>" if d.get("url") else d["title"] for d in docs)
 
 
+def headline(record: Dict) -> str:
+    """제안을 한눈에 알 수 있는 한 줄: 아이콘 + 사서의 한 줄 요약. 요약이 없는 예전 제안은 제목"""
+    if not record.get("summary"):
+        return record["content"]
+    return f"{CATEGORY_ICONS.get(record.get('category'), '📝')} {record['summary']}"
+
+
 def item_blocks(record: Dict) -> List[Dict]:
-    """제안 하나: 제목·문제·참고 문서, 사서 제안, 버튼"""
+    """제안 하나: 한 줄 요약·근거·참고 문서, 사서 제안, 버튼"""
     what = TYPE_LABELS[record["proposal_type"]]
     if record["proposal_type"] == backlog.WRITING:
         what += f" ('{record['new_doc_title']}')"
-    head = [f"*{record['content']}*", record.get("problem", "")]
+    problem = record.get("problem", "")
+    head = [f"*{headline(record)}*", f"근거 · {problem}" if problem and record.get("summary") else problem]
     if record.get("docs"):
         head.append(f"참고 문서: {doc_links(record['docs'])}")
     proposal = f"💡 *사서 제안* — 통과하면 {what}\n```{record['proposal']}```"
@@ -121,14 +130,15 @@ def send_review(client, assignee_id: Optional[str], target: Dict, records: List[
         return
     link = f"<{target['url']}|{target['title']}>"
     lines = [intro or (f"🧹 {link} 을(를) 정리하면서 확인이 필요한 것 *{len(records)}건*을 찾았어요.\n"
-                       "통과하면 노션에 바로 반영돼요. 스레드에서 하나씩 처리해 주세요." if records else f"🧹 {link} 을(를) 정리했어요.")]
+                       + "".join(f"{no}. {headline(r)}\n" for no, r in enumerate(records, 1))
+                       + "통과하면 노션에 바로 반영돼요. 스레드에서 하나씩 처리해 주세요." if records else f"🧹 {link} 을(를) 정리했어요.")]
     if unreadable:
         lines.append(unreadable)
     if not requester_found:
         lines.append("(받으실 분을 슬랙에서 찾지 못해 대신 보내요)")
     head = client.chat_postMessage(channel=channel, text="\n\n".join(lines))
     for record in records:
-        sent = client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
+        sent = client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=headline(record), blocks=item_blocks(record))
         # 문서가 갱신돼 사서가 제안을 닫을 때 이 메세지의 버튼을 결과 문구로 바꾼다
         backlog.update(record["backlog_id"], slack_channel=sent["channel"], slack_ts=sent["ts"])
     logger.info("📬 [사서] '%s' 제안 %d건을 %s 에게 보냈습니다.", target["title"], len(records), channel)
@@ -288,10 +298,10 @@ def handle_chat(body, client) -> None:
         client.chat_postEphemeral(channel=channel_id, user=user_id, text="이미 이 제안의 대화 스레드가 있어요. 그 스레드에서 이어서 말해 주세요.")
         return
     head = client.chat_postMessage(channel=channel_id, text=(
-        f"💬 *{record['content']}* 을(를) 대화로 고쳐요.\n"
+        f"💬 *{headline(record)}*\n이 제안을 대화로 고쳐요. "
         "이 스레드에 고칠 점을 말해 주세요. (예: '보스 부분은 빼 줘', '디고리 내용이 맞는지 다시 확인해 줘')\n"
         "마음에 들면 스레드의 마지막 [✅ 이대로 통과]를 눌러 주세요."))
-    client.chat_postMessage(channel=channel_id, thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
+    client.chat_postMessage(channel=channel_id, thread_ts=head["ts"], text=headline(record), blocks=item_blocks(record))
     backlog.update(backlog_id, chat_ts=head["ts"], chat_history=[])
     update_item(client, channel_id, body["message"], backlog_id, "💬 대화 스레드에서 고치는 중이에요.")
 
@@ -369,7 +379,7 @@ def handle_toss_submit(body, client) -> None:
     head = client.chat_postMessage(channel=to_user, text=(
         librarian_slack.toss_notice(user_id, "사서 제안을", memo)
         + "\n스레드에서 처리해 주세요. 담당이 아니면 다시 [🔁 토스]로 넘길 수 있어요."))
-    sent = client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=record["content"], blocks=item_blocks(record))
+    sent = client.chat_postMessage(channel=head["channel"], thread_ts=head["ts"], text=headline(record), blocks=item_blocks(record))
     backlog.update(record["backlog_id"], slack_channel=sent["channel"], slack_ts=sent["ts"])
     update_item(client, meta["channel"], find_message(client, meta), record["backlog_id"], f"🔁 <@{to_user}> 님에게 넘겼어요.")
     logger.info("🔁 [사서 제안] %s → %s: %s", user_id, to_user, record["content"])

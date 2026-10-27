@@ -124,6 +124,37 @@ def test_parse_findings_keeps_valid_items():
     assert review.parse_findings("JSON 아님") == []
 
 
+def test_parse_findings_cleans_summary_and_category():
+    text = json.dumps({"findings": [
+        {**DECISION, "category": "conflict", "summary": "잔불 강타 위치가\n문서마다 달라요: " + "가" * 200},
+        {**DECISION, "category": "이상한값"}, {**WRITING}]}, ensure_ascii=False)
+    conflict, unknown, writing = review.parse_findings(text)
+    assert "\n" not in conflict["summary"] and len(conflict["summary"]) == review.SUMMARY_CHARS
+    assert conflict["summary"].startswith("잔불 강타 위치가 문서마다 달라요")
+    assert (unknown["category"], unknown["summary"]) == ("", "")
+    assert writing["category"] == backlog.TOPIC                                       # 새 문서 제안은 흩어진 주제
+
+
+def test_item_leads_with_one_line_summary(store):
+    record = add({**DECISION, "category": "conflict", "summary": "잔불 강타 위치가 문서마다 달라요: 디고리 파트너 ↔ 전투 요소 리더",
+                  "problem": "「디고리」 \"파트너 스킬\" / 「전투 요소」 \"리더 스킬\""})
+    head = proposal_slack.item_blocks(record)[0]["text"]["text"]
+    assert head.startswith("*🔀 잔불 강타 위치가 문서마다 달라요: 디고리 파트너 ↔ 전투 요소 리더*\n근거 · 「디고리」")
+    assert DECISION["title"] not in head
+    old = proposal_slack.item_blocks(add())[0]["text"]["text"]                          # 요약이 없는 예전 제안은 제목 그대로
+    assert old.startswith(f"*{DECISION['title']}*\n{DECISION['problem']}")
+
+
+def test_review_head_lists_every_summary(store):
+    slack = FakeSlack()
+    records = [add({**DECISION, "category": "conflict", "summary": "잔불 강타 위치가 문서마다 달라요"}),
+               add({**DECISION, "category": "missing", "summary": "잔불 강타 연출이 비어 있어요"}), add()]
+    proposal_slack.send_review(slack, "U1", TARGET, records)
+    head = slack.posts[0]["text"]
+    assert "1. 🔀 잔불 강타 위치가 문서마다 달라요\n2. 🕳️ 잔불 강타 연출이 비어 있어요\n3. 결정이 필요함: 잔불 강타 위치\n" in head
+    assert [p["text"] for p in slack.posts[1:]] == ["🔀 잔불 강타 위치가 문서마다 달라요", "🕳️ 잔불 강타 연출이 비어 있어요", DECISION["title"]]
+
+
 def test_earlier_proposals_show_status_and_reason(store):
     record = add()
     backlog.close(record["backlog_id"], "U1", backlog.REJECTED, reject_reason="폐기된 콘텐츠")

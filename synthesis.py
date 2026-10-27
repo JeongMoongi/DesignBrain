@@ -29,7 +29,8 @@ SYNTHESIS_PROMPT = (
     "- 전용 기획서가 없는 항목은 '전용 기획서 없음'이라고 쓴다.\n"
     "- 요청 주제의 범위까지만 담는다.\n\n"
     "[출력]\n"
-    "JSON만 출력한다: {\"new_doc_title\": \"새 문서 제목\", \"problem\": \"왜 이 문서가 필요한지 (어떤 정보가 어느 문서들에 흩어져 있는지) 2문장 이내\", "
+    "JSON만 출력한다: {\"new_doc_title\": \"새 문서 제목\", "
+    "\"summary\": \"기획자가 한 줄만 읽고 알 수 있는 요약, 40자 안팎 (예: '챕터 1 적 구성이 여러 문서에 흩어져 있어요')\", \"problem\": \"왜 이 문서가 필요한지 (어떤 정보가 어느 문서들에 흩어져 있는지) 2문장 이내\", "
     "\"proposal\": \"지도 문서 초안 전체. '## 분류'와 '- 항목' 한 줄씩, 1500자 이내\", "
     "\"assumptions\": \"초안에서 근거 없이 정한 부분 요약 (없으면 빈 문자열)\", \"related_docs\": [\"근거로 읽은 문서 이름\"]}\n"
     "모을 정보가 실제로는 한 문서에 이미 정리돼 있으면 {\"skip\": \"이유\"}만 출력한다."
@@ -68,6 +69,7 @@ def draft(job: Dict) -> Optional[Dict]:
         logger.info("📚 [사서 종합] '%s' 초안을 만들지 않습니다: %s", job["topic"], data.get("skip", "형식 오류"))
         return None
     return {"type": backlog.WRITING, "title": f"작성이 필요함: {data['new_doc_title']}", "new_doc_title": data["new_doc_title"],
+            "category": backlog.TOPIC, "summary": review.one_line(data.get("summary")),
             "problem": data.get("problem", ""), "proposal": data["proposal"], "assumptions": data.get("assumptions", ""),
             "related_docs": data.get("related_docs", [])}
 
@@ -78,6 +80,7 @@ UPDATE_PROMPT = (
     "지도의 항목(목록, 분류, 한 줄 특징, 출처)이 바뀐 문서와 어긋나거나, 바뀐 문서에 새로 생겨 지도에 빠진 항목이 있는지 확인하라. "
     "지도에 없는 상세(수치, 패턴)의 변경은 무시한다. [이미 낸 제안]과 같은 것은 다시 내지 마라.\n"
     "고칠 것이 있으면 JSON만 출력한다: {\"needs_update\": true, \"title\": \"결정이 필요함: …\", "
+    "\"summary\": \"기획자가 한 줄만 읽고 알 수 있는 요약, 40자 안팎 (예: '지도에 모드레드가 빠져 있어요: 챕터 2 보스에 새로 생김')\", "
     "\"problem\": \"무엇이 어긋나는지 원문 인용, 2문장 이내\", \"proposal\": \"지도에 반영할 항목 줄만 지도 형식으로 (참고: 문서 이름) 포함\", "
     "\"assumptions\": \"\"}\n"
     "고칠 것이 없으면 {\"needs_update\": false}만 출력한다."
@@ -119,7 +122,8 @@ def check_dependents(page_id: str) -> List[Dict]:
             continue
         target = {"page_id": summary_page, "title": summary["new_doc_title"], "url": summary.get("notion_url", "")}
         source = next(iter(backlog.linked_docs([page_id])), None)
-        finding = {"type": backlog.DECISION, "title": data["title"], "problem": data.get("problem", ""),
+        finding = {"type": backlog.DECISION, "title": data["title"],
+                   "summary": review.one_line(data.get("summary")), "problem": data.get("problem", ""),
                    "proposal": data["proposal"], "assumptions": data.get("assumptions", "")}
         slack = proposal_slack.web_client()
         assignee_id = summary.get("resolved_by") or config.DIAGNOSIS_REPORT_USER_ID

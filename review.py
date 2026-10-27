@@ -24,8 +24,15 @@ REVIEW_PROMPT = (
     "3. 새 주제: 여러 문서에 흩어져 있어 한 문서로 정리하면 좋을 주제.\n\n"
     "[항목 형식]\n"
     "- type: 1·2는 \"decision\"(이 문서에 결정을 덧붙이면 해결), 3은 \"writing\"(새 문서가 필요)\n"
+    "- category: 1은 \"conflict\", 2는 \"missing\", 3은 \"topic\"\n"
     "- title: decision은 '결정이 필요함: …', writing은 '작성이 필요함: …'. 무엇이 필요한지만 쓰고 결론을 단정하지 마라.\n"
-    "- problem: 무엇이 문제인지와 근거(어느 문서의 어떤 내용인지 원문 인용). 3문장 이내.\n"
+    "- summary: 기획자가 이 한 줄만 읽고 무엇이 문제인지 바로 알 수 있는 요약. 40자 안팎의 한 줄. "
+    "무엇을 해야 하는지가 아니라 무엇을 발견했는지를 쓰고, 대상 이름과 수치를 직접 쓴다. 해결책은 쓰지 않는다.\n"
+    "  · conflict: '[대상]이(가) 문서마다 달라요: [문서] [값] ↔ [문서] [값]' (예: '넉백 추가량이 문서마다 달라요: 넉백 추가량 +30% ↔ 공용 전투 규칙 +3m')\n"
+    "  · missing: '[대상]이(가) 비어 있어요: [어디]' 또는 '[무엇]이(가) 적혀 있지 않아요' (예: '넉백 연출이 비어 있어요: 피격 이펙트·사운드')\n"
+    "  · topic: '[주제]이(가) 여러 문서에 흩어져 있어요'\n"
+    "  · 나쁜 예: '적용 방식 검토 필요', '수치 정합성 확인' (무엇이 문제인지 알 수 없다)\n"
+    "- problem: 근거. 어느 문서의 어떤 내용인지 원문을 짧게 인용한다 (예: 「넉백 추가량」 \"기본 넉백의 30% 추가\"). 2문장 이내.\n"
     "- proposal: 사서의 제안. decision이면 이 문서의 '📌 결정 기록'에 그대로 붙일 결정 내용을 기획서 문체로 쓴다. "
     "근거 문서가 있으면 그 내용을 따르는 안을, 근거가 없으면 합리적인 안을 낸다. "
     "writing이면 새 문서 초안 전체를 '## 소제목'과 '- 목록'으로 쓰고, 각 내용 끝에 출처 문서를 '(참고: 문서 이름)'으로 단다. "
@@ -39,7 +46,8 @@ REVIEW_PROMPT = (
     "- [이미 낸 제안]과 같은 내용은 다시 내지 마라. 반려된 제안은 사유를 존중하라.\n"
     "- 문서의 '📌 결정 기록'에 이미 결정된 것은 본문과 달라도 해결된 것으로 본다.\n"
     "- 찾은 것이 없으면 빈 목록을 낸다.\n"
-    '- 마지막에는 JSON만 출력한다: {"findings": [{"type": "...", "title": "...", "problem": "...", "proposal": "...", '
+    '- 마지막에는 JSON만 출력한다: {"findings": [{"type": "...", "category": "...", "title": "...", "summary": "...", '
+    '"problem": "...", "proposal": "...", '
     '"assumptions": "...", "related_docs": ["..."], "new_doc_title": "..."}]}'
 )
 REVIEW_MAX_TOOL_ROUNDS = 8
@@ -88,6 +96,16 @@ def parse_json(text: str) -> Dict:
         return {}
 
 
+CATEGORIES = (backlog.CONFLICT, backlog.MISSING, backlog.TOPIC)
+SUMMARY_CHARS = 100
+
+
+def one_line(text) -> str:
+    """한 줄 요약을 한 줄로 (줄바꿈은 공백으로, 너무 길면 자른다)"""
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= SUMMARY_CHARS else text[:SUMMARY_CHARS - 1] + "…"
+
+
 def parse_findings(text: str) -> List[Dict]:
     """모델 출력의 JSON에서 형식이 맞는 항목만 고른다"""
     data = parse_json(text)
@@ -96,6 +114,9 @@ def parse_findings(text: str) -> List[Dict]:
         if f.get("type") in (backlog.DECISION, backlog.WRITING) and f.get("title") and f.get("proposal"):
             if f["type"] == backlog.WRITING and not f.get("new_doc_title"):
                 f["new_doc_title"] = f["title"].split(":", 1)[-1].strip()
+            f["summary"] = one_line(f.get("summary"))
+            if f.get("category") not in CATEGORIES:
+                f["category"] = backlog.TOPIC if f["type"] == backlog.WRITING else ""
             findings.append(f)
     return findings
 
