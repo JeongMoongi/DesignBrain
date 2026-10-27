@@ -37,6 +37,8 @@ CONFLICT, MISSING, TOPIC = "conflict", "missing", "topic"
 LINKED_MIN_SCORE = 0.33
 UNLINKED_MIN_SCORE = 0.40
 MAX_NOTES_PER_ANSWER = 3
+# 답변 끝의 참고 문구에서 '기획자 확인 대기' 항목은 이 머리말을 한 번만 보여주고 묶는다 (ai_engine.format_notes)
+WAITING_NOTE_PREFIX = "아직 기획자 확인을 기다리는 부분이에요 — "
 
 # 슬랙에서 쓰는 백로그 명령 키워드와 등록 안내 문구 (대화 기록에서 이 메세지들을 거를 때도 쓴다)
 BACKLOG_KEYWORD = "백로그"
@@ -248,7 +250,7 @@ def add_proposal(finding: Dict, target: Dict[str, str], related: List[Dict[str, 
         "assumptions": finding.get("assumptions", ""),
         "new_doc_title": finding.get("new_doc_title", ""),
         # 답변 끝 참고 문구: 이 부분은 아직 기획자 확인을 기다린다는 것을 알린다
-        "note": f"아직 기획자 확인을 기다리는 부분이에요 — {title}",
+        "note": f"{WAITING_NOTE_PREFIX}{title}",
         "reporter_id": "",
         # 슬랙에 보이는 이름 (사서는 기능을 가리키는 내부 이름이라 사용자에게는 '사서'로 보인다)
         "reporter_name": "사서",

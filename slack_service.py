@@ -11,12 +11,25 @@ import qa_log
 
 logger = logging.getLogger(__name__)
 
+BOLD_SPAN = re.compile(r"\*(?=\S)([^*\n]*?\S)\*")
+CODE_SPAN = re.compile(r"(```.*?```|`[^`\n]*`)", re.S)
+
+def drop_unrenderable_bold(text: str) -> str:
+    """슬랙은 *굵게*의 앞뒤가 글자나 숫자와 붙어 있으면(예: '*50종*이며') 굵게 처리하지 못하고 별표를 그대로 보여준다.
+    한국어는 조사가 바로 붙어서 흔히 생긴다. 이런 굵게는 별표를 떼어 평범한 글로 만든다. 코드(`...`)와 곱셈의 별표('A * B')는 건드리지 않는다."""
+    def fix(match):
+        before = match.string[match.start() - 1] if match.start() else " "
+        after = match.string[match.end()] if match.end() < len(match.string) else " "
+        return match.group(0) if not (before.isalnum() or after.isalnum()) else match.group(1)
+    return "".join(part if i % 2 else BOLD_SPAN.sub(fix, part) for i, part in enumerate(CODE_SPAN.split(text)))
+
 def format_markdown_for_slack(text: str) -> str:
     if not text: return ""
     # 이미지는 링크 변환보다 먼저 제거해야 `![..](..)`가 링크로 바뀌지 않음
     text = re.sub(r'!\[[^\]]*\]\(https?://[^\s)]+\)', '', text)
     text = re.sub(r'\[([^\]]*)\]\((https?://[^\s)]+)\)', r'<\2|🔗 \1>', text)
     text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
+    text = drop_unrenderable_bold(text)
     text = text.replace("- 참고 문서 :", "• *참고 문서:*")
     return text.strip()
 

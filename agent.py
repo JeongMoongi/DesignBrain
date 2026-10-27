@@ -9,6 +9,7 @@ import backlog
 import clients
 import config
 import notion_parser
+import answer_style
 import qa_lens
 import search
 
@@ -56,6 +57,7 @@ SYSTEM_PROMPT = (
     f"사용한 문서가 없으면 '{ai_engine.USED_DOCS_LABEL} 없음'이라고 적어라."
 )
 # QA 담당자의 'QA 할건데 뭘 볼까?' 같은 질문에 가볍게 답하는 규칙 (qa_lens.py)
+SYSTEM_PROMPT += answer_style.STYLE_PROMPT
 SYSTEM_PROMPT += qa_lens.QA_PROMPT
 # 정리본을 읽을 때 덧붙이는 안내 (config.AGENT_SOURCE == "refined")
 REFINED_PROMPT = (

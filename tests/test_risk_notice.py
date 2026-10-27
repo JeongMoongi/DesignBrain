@@ -8,15 +8,20 @@ import clients
 import config
 import indexing
 import notion_parser
+import notion_writer
 import property_check
 import proposal_slack
 import qa_lens
 import risk_notice
 
 PAGE_ID = "11111111-1111-1111-1111-111111111111"
-RISK_REPLY = {"level": "높음", "areas": [
-    {"area": "폭주 상태 전이", "reason": "혈기 3중첩에서 폭주로 바뀌는 조건이 겹친다", "lens": ["edge", "combo", "없는관점"], "check": "중첩 직전/직후 값"},
-    {"area": "수치 모호", "reason": "폭주 지속시간이 적혀 있지 않다", "lens": ["data"], "check": ""}]}
+RISK_REPLY = {
+    "level": "높음",
+    "unknown": ["한 축만 0일 때 어떻게 밀리는지", "부호가 음수일 때 추가량이 더해지는지"],
+    "tests": [{"name": "가산 순서", "test": "`(-1, 5)`에 `(3, 3)` 적용 → `(-4, 8)`"},
+              {"name": "방향 비참조", "test": "바라보는 방향만 바꿔 비교 → 결과 동일"}],
+    "views": ["입문 유저 기준 — 혈기 3중첩 조건을 설명 없이 이해하는지"]}
+NOTHING = {"level": "낮음", "unknown": [], "tests": [], "views": []}
 
 
 def response(text="", output=()):
@@ -62,6 +67,7 @@ def settings(monkeypatch):
     monkeypatch.setattr(config, "TEST_NOTIFY_IDS", ["UQA1", "UQA2"])
     monkeypatch.setattr(config, "TEST_NOTICE_CHANGE_RATIO", 0.3)
     monkeypatch.setattr(risk_notice, "_analyzing", set())
+    monkeypatch.setattr(config, "NOTION_INTEGRATION_TOKEN", None)                      # 문의할 사람 조회는 people 픽스처를 쓰는 테스트에서만
 
 
 def body(changed=0, tag="수정"):
@@ -76,17 +82,35 @@ def doc(text=None):
 # --- 분석 ---
 def test_analyze_normalizes_the_model_output(ai):
     risks = risk_notice.analyze(doc())
-    assert risks["level"] == "높음" and [a["area"] for a in risks["areas"]] == ["폭주 상태 전이", "수치 모호"]
-    assert risks["areas"][0]["lens"] == ["edge", "combo"]                              # 모르는 관점은 버린다
-    ai.reply = json.dumps({"level": "아주높음", "areas": [{"area": f"영역{i}", "reason": "r"} for i in range(8)] + ["문자열", {"reason": "이름 없음"}]})
+    assert risks["level"] == "높음" and risks["unknown"] == RISK_REPLY["unknown"] and risks["views"] == RISK_REPLY["views"]
+    assert risks["tests"] == RISK_REPLY["tests"]
+    ai.reply = json.dumps({"level": "아주높음", "unknown": [f"상황{i}" for i in range(8)] + [3, ""], "views": [f"관점{i}" for i in range(5)],
+                           "tests": [{"name": f"이름{i}", "test": f"해보기{i}"} for i in range(6)] + ["문자열", {"name": "내용 없음", "test": ""}]})
     risks = risk_notice.analyze(doc())
-    assert risks["level"] == "보통" and len(risks["areas"]) == risk_notice.MAX_AREAS
+    assert risks["level"] == "보통" and len(risks["unknown"]) == risk_notice.MAX_UNKNOWN
+    assert len(risks["tests"]) == risk_notice.MAX_TESTS and len(risks["views"]) == risk_notice.MAX_VIEWS
+    ai.reply = json.dumps({"unknown": "문자열이 와도", "tests": "깨지지 않는다", "views": None})
+    assert not risk_notice.has_content(risk_notice.analyze(doc()))
     ai.reply = "JSON이 아님"
-    assert risk_notice.analyze(doc())["areas"] == []
+    assert not risk_notice.has_content(risk_notice.analyze(doc()))
 
 
-def test_analysis_prompt_uses_the_shared_lenses():
-    assert all(f"{lens.key}({lens.name})" in risk_notice.PROMPT for lens in qa_lens.LENSES)
+def test_analysis_prompt_separates_unknowns_from_testable_things_and_filters_views():
+    prompt = risk_notice.PROMPT
+    assert "추상적인 이름('부호·0 경계') 대신 구체적인 상황" in prompt                      # 미정의는 상황 문장으로
+    assert "정답이 적혀 있지 않은 것을 tests에 넣지 말고 unknown에 넣어라" in prompt         # 정답을 모르는 것은 바로 테스트할 것이 아니다
+    assert qa_lens.VIEW_RULE in prompt and qa_lens.JUDGE_RULE in prompt
+    assert "개발자 관점" in prompt and "해당하는 게 없으면 쓰지 않는다" in prompt           # 추상적·개발자 관점은 쓰지 않는다
+    assert "해보기 → 정상 기준" in prompt and "세 배열을 모두 비워라" in prompt
+
+
+def test_overlong_items_are_cut_with_an_ellipsis(ai):
+    ai.reply = json.dumps({"level": "보통", "unknown": ["가" * 200], "views": ["나" * 200],
+                           "tests": [{"name": "다" * 80, "test": "라" * 500}]})
+    risks = risk_notice.analyze(doc())
+    assert len(risks["unknown"][0]) == risk_notice.UNKNOWN_CHARS and risks["unknown"][0].endswith("…")
+    assert len(risks["views"][0]) == risk_notice.VIEW_CHARS
+    assert len(risks["tests"][0]["name"]) == risk_notice.TEST_NAME_CHARS and len(risks["tests"][0]["test"]) == risk_notice.TEST_CHARS
 
 
 # --- 얼마나 바뀌었나 ---
@@ -106,12 +130,46 @@ def test_change_ratio():
 def test_first_registration_sends_one_plain_dm_to_every_qa(ai, slack):
     assert risk_notice.notify(doc()) is True
     assert [p["channel"] for p in slack.posts] == ["UQA1", "UQA2"]
-    sent = slack.posts[0]
-    assert "blocks" not in sent                                                        # 버튼 없이 글만 간다
-    text = sent["text"]
-    assert "<https://notion/P1|니사리엘>" in text and "🔴 높음" in text and "폭주 상태 전이" in text
-    assert "↳ 확인: 중첩 직전/직후 값" in text and "↳ 관점: 경계·예외, 상호작용·조합" in text
-    assert "`@Brain 니사리엘 QA 할건데 뭘 볼까?`" in text                                  # 더 궁금하면 편하게 물어보라는 안내
+    assert "blocks" not in slack.posts[0]                                              # 버튼 없이 글만 간다
+    assert slack.posts[0]["text"] == (
+        "🔎 <https://notion/P1|니사리엘> 등록됐어요 (🔴 높음) · 🆕 처음 등록\n"
+        "\n"
+        "❓ *미정의* — 기획에 먼저 물어보세요\n"
+        "• 한 축만 0일 때 어떻게 밀리는지\n"
+        "• 부호가 음수일 때 추가량이 더해지는지\n"
+        "\n"
+        "🎯 *바로 테스트할 것*\n"
+        "1. 가산 순서 — `(-1, 5)`에 `(3, 3)` 적용 → `(-4, 8)`\n"
+        "2. 방향 비참조 — 바라보는 방향만 바꿔 비교 → 결과 동일\n"
+        "\n"
+        "🎭 *이 관점으로 보세요*\n"
+        "• 입문 유저 기준 — 혈기 3중첩 조건을 설명 없이 이해하는지\n"
+        "\n"
+        "💬 더 궁금하면 `@Brain 니사리엘 QA 뭘 볼까?`")
+
+
+def test_sections_without_content_are_left_out(ai, slack):
+    ai.reply = json.dumps({"level": "보통", "unknown": [], "views": [], "tests": [{"name": "", "test": "A 적용 → B"}]})
+    risk_notice.notify(doc())
+    text = slack.posts[0]["text"]
+    assert "🎯 *바로 테스트할 것*\n1. A 적용 → B" in text                                # 이름이 없으면 해보기만
+    assert "❓" not in text and "🎭" not in text
+
+
+def test_notice_is_short_enough_to_skim(ai, slack):
+    ai.reply = json.dumps({"level": "보통", "unknown": ["u" * 300] * 9, "views": ["v" * 300] * 9,
+                           "tests": [{"name": "n" * 99, "test": "t" * 500}] * 9})
+    risk_notice.notify(doc())
+    lines = slack.posts[0]["text"].splitlines()
+    assert sum(l.startswith("• ") for l in lines) == risk_notice.MAX_UNKNOWN + risk_notice.MAX_VIEWS
+    assert sum(l[:2] in ("1.", "2.", "3.", "4.") for l in lines) == risk_notice.MAX_TESTS
+    assert max(len(l) for l in lines) <= risk_notice.TEST_NAME_CHARS + risk_notice.TEST_CHARS + 6      # 어떤 줄도 길게 늘어지지 않는다
+
+
+def test_a_changed_document_says_how_much_changed(ai, slack):
+    risk_notice.notify(doc())
+    assert risk_notice.notify(doc(body(8))) is True
+    assert "· 🔄 40% 수정" in slack.posts[2]["text"] and "🆕" not in slack.posts[2]["text"]   # 20줄 중 8줄
 
 
 def test_small_edits_are_not_announced_again(ai, slack):
@@ -142,7 +200,7 @@ def test_change_threshold_is_configurable(ai, slack, monkeypatch):
 
 
 def test_no_risk_means_no_message_and_no_repeated_analysis(ai, slack):
-    ai.reply = json.dumps({"level": "낮음", "areas": []})
+    ai.reply = json.dumps(NOTHING)
     assert risk_notice.notify(doc()) is False and slack.posts == []
     calls = len(ai.requests)
     assert risk_notice.notify(doc()) is False and len(ai.requests) == calls            # 같은 본문을 또 분석하지 않는다
@@ -201,15 +259,74 @@ class Immediate:
 def test_async_runs_in_the_background_and_never_raises(monkeypatch):
     ran = []
     monkeypatch.setattr(risk_notice, "threading", types.SimpleNamespace(Thread=Immediate))
-    monkeypatch.setattr(risk_notice, "notify", lambda d: ran.append(d["title"]))
-    risk_notice.notify_async(doc())
-    assert ran == ["니사리엘"]
-    monkeypatch.setattr(risk_notice, "notify", lambda d: (_ for _ in ()).throw(RuntimeError("분석 실패")))
+    monkeypatch.setattr(risk_notice, "notify", lambda d, requested_by=None: ran.append((d["title"], requested_by)))
+    risk_notice.notify_async(doc(), "N1")
+    assert ran == [("니사리엘", "N1")]                                                  # 'DB 등록'을 누른 사람이 넘어간다
+    monkeypatch.setattr(risk_notice, "notify", lambda d, requested_by=None: (_ for _ in ()).throw(RuntimeError("분석 실패")))
     risk_notice.notify_async(doc())                                                    # 실패해도 예외가 새지 않는다
     monkeypatch.setattr(config, "TEST_NOTIFY_IDS", [])
-    monkeypatch.setattr(risk_notice, "notify", lambda d: ran.append("호출됨"))
+    monkeypatch.setattr(risk_notice, "notify", lambda d, requested_by=None: ran.append("호출됨"))
     risk_notice.notify_async(doc())
-    assert ran == ["니사리엘"]                                                         # 받을 사람이 없으면 아무것도 하지 않는다
+    assert ran == [("니사리엘", "N1")]                                                  # 받을 사람이 없으면 아무것도 하지 않는다
+
+
+# --- 미정의를 물어볼 사람 ---
+OWNER_PAGE = {"properties": {"담당자": {"type": "people", "people": [{"id": "N-OWNER", "name": "박상우"}]}}}
+
+
+@pytest.fixture
+def people(monkeypatch):
+    """노션 문서의 담당자와 노션 → 슬랙 사용자 연결을 가짜로 바꾼다"""
+    state = types.SimpleNamespace(page=OWNER_PAGE, fetched=[], slack_ids={"N-OWNER": "USANGWOO", "N-REQ": "UREQ"},
+                                  names={"N-REQ": "김제민"})
+    monkeypatch.setattr(config, "NOTION_INTEGRATION_TOKEN", "tok")
+    monkeypatch.setattr(notion_parser, "fetch_page", lambda page_id, token: state.fetched.append(page_id) or state.page)
+    monkeypatch.setattr(proposal_slack, "slack_user_for_notion", lambda client, notion_id: state.slack_ids.get(notion_id))
+    monkeypatch.setattr(notion_writer, "user_info", lambda notion_id: {"name": state.names.get(notion_id, "")})
+    return state
+
+
+def test_unknowns_name_the_document_owner_to_ask(ai, slack, people):
+    risk_notice.notify(doc())
+    assert "❓ *미정의* — 기획에 먼저 물어보세요 (문의: <@USANGWOO>)" in slack.posts[0]["text"]     # DM에는 슬랙 멘션
+
+
+def test_channels_get_the_name_so_the_owner_is_not_pinged(ai, slack, people, monkeypatch):
+    monkeypatch.setattr(config, "TEST_NOTIFY_IDS", ["UQA1", "C0QACHANNEL"])
+    risk_notice.notify(doc())
+    assert "(문의: <@USANGWOO>)" in slack.posts[0]["text"] and "(문의: 박상우)" in slack.posts[1]["text"]
+
+
+def test_without_an_owner_the_person_who_registered_is_asked(ai, slack, people):
+    people.page = {"properties": {"담당자": {"type": "people", "people": []}}}
+    risk_notice.notify(doc(), requested_by="N-REQ")
+    assert "(문의: <@UREQ>)" in slack.posts[0]["text"]
+    assert people.names == {"N-REQ": "김제민"}
+
+
+def test_name_is_used_when_the_owner_is_not_in_slack(ai, slack, people):
+    people.slack_ids = {}
+    risk_notice.notify(doc())
+    assert "(문의: 박상우)" in slack.posts[0]["text"]
+
+
+def test_no_contact_is_better_than_a_wrong_one(ai, slack, people):
+    people.page = {"properties": {}}
+    risk_notice.notify(doc())                                                          # 담당자도 누른 사람도 모른다
+    assert "미정의* — 기획에 먼저 물어보세요\n" in slack.posts[0]["text"] and "문의:" not in slack.posts[0]["text"]
+
+
+def test_contact_lookup_failure_still_sends_the_notice(ai, slack, people, monkeypatch):
+    monkeypatch.setattr(notion_parser, "fetch_page", lambda page_id, token: (_ for _ in ()).throw(RuntimeError("노션 장애")))
+    monkeypatch.setattr(proposal_slack, "slack_user_for_notion", lambda client, notion_id: (_ for _ in ()).throw(RuntimeError("슬랙 장애")))
+    assert risk_notice.notify(doc(), requested_by="N-REQ") is True
+    assert "문의:" not in slack.posts[0]["text"] and "❓ *미정의*" in slack.posts[0]["text"]
+
+
+def test_contact_is_only_looked_up_when_there_is_something_to_ask(ai, slack, people):
+    ai.reply = json.dumps({"level": "보통", "unknown": [], "views": [], "tests": [{"name": "a", "test": "b → c"}]})
+    risk_notice.notify(doc())
+    assert people.fetched == []
 
 
 # --- 연결 ---
@@ -217,7 +334,7 @@ def test_async_runs_in_the_background_and_never_raises(monkeypatch):
 def sync_env(local_db, monkeypatch, no_network):
     calls = []
     monkeypatch.setattr(property_check, "run", lambda *a: None)
-    monkeypatch.setattr(risk_notice, "notify_async", lambda doc_data: calls.append(doc_data["title"]))
+    monkeypatch.setattr(risk_notice, "notify_async", lambda doc_data, requested_by=None: calls.append((doc_data["title"], requested_by)))
     monkeypatch.setattr(notion_parser, "fetch_page", lambda page_id, token: {
         "in_trash": False, "archived": False, "url": "https://notion/P", "properties": {"n": {"type": "title", "title": [{"plain_text": "문서"}]}}})
     monkeypatch.setattr(notion_parser, "extract_blocks_recursive", lambda page_id, token, out, images, *a, **k: out.extend(["본문 한 줄", "본문 두 줄"]))
@@ -230,7 +347,7 @@ def test_notice_comes_only_with_the_db_register_button(sync_env):
     indexing.sync_document_to_db(PAGE_ID, "tok", requested_by="N1")                    # 사서 제안 승인 뒤 재동기화
     assert sync_env == []
     indexing.sync_document_to_db(PAGE_ID, "tok", requested_by="N1", check_properties=True)   # 'DB 등록' 버튼
-    assert sync_env == ["문서"]
+    assert sync_env == [("문서", "N1")]                                                # 누른 사람도 함께 넘어간다
 
 
 # --- 질문 답변 에이전트의 QA 답변 ---
@@ -246,6 +363,10 @@ def test_qa_rules_reach_the_agent_and_cover_every_lens(monkeypatch):
     result = agent.ask_agent("니사리엘 QA 할건데 뭘 볼까?", [], {})
     instructions = sent[0]["instructions"]
     assert qa_lens.QA_PROMPT in instructions and instructions.startswith(agent.SYSTEM_PROMPT[:50])
+    assert "해보기: ○○ → 정상: ○○" in instructions and "전체 15줄 안팎" in instructions   # 따라 할 수 있는 모양으로 답하게 한다
+    # 알림 DM과 같은 세 덩어리, 같은 관점 규칙
+    assert "❓ 미정의" in instructions and "🎯 바로 테스트할 것" in instructions and "🎭 이 관점으로 보세요" in instructions
+    assert qa_lens.VIEW_RULE in instructions and qa_lens.JUDGE_RULE in instructions
     assert all(lens.name in instructions and lens.focus in instructions for lens in qa_lens.LENSES)
     assert "되묻지 말고" in instructions and "export_markdown" in qa_lens.QA_PROMPT and "- [ ]" in qa_lens.QA_PROMPT
     assert result["AI_답변"] == "니사리엘 QA 포인트예요."

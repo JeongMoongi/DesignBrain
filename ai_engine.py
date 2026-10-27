@@ -5,6 +5,7 @@ from collections import Counter
 from typing import Callable, List, Dict
 import openai
 from qdrant_client.http import exceptions as qdrant_exceptions
+import answer_style
 import backlog
 import clients
 import config
@@ -112,7 +113,7 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
     # 2. GPT 프롬프트 구성
     system_prompt = (
         "너는 게임 기획팀의 친근하고 유능한 AI 어시스턴트 '@Brain'이다.\n"
-        "제공된 기획서 [컨텍스트] 및 표(Table) 데이터에 기반하여 사용자의 질문에 정확하고 상세하게 답변하라.\n"
+        "제공된 기획서 [컨텍스트] 및 표(Table) 데이터에 기반하여 사용자의 질문에 정확하게 답변하라.\n"
         "컨텍스트의 표나 텍스트에 있는 항목명과 수치는 원문 그대로 정확하게 인용하라.\n"
         f"컨텍스트의 '{notion_parser.LINK_REFERENCE_PREFIX}' 줄은 다른 문서를 가리키는 링크일 뿐 그 문서의 내용이 아니다. "
         "질문과 관련 있을 때만 '참고 자료로 [제목](주소)도 있어요'처럼 짧게 언급하고, 링크 너머의 내용을 추측하지 마라.\n"
@@ -120,6 +121,7 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
         f"사용한 문서가 없으면 '{USED_DOCS_LABEL} 없음'이라고 적어라."
     )
     
+    system_prompt += answer_style.STYLE_PROMPT
     messages = [{"role": "system", "content": system_prompt}]
     
     for h in chat_history[-ANSWER_HISTORY_TURNS:]:
@@ -138,6 +140,16 @@ def _ask_ai(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, 
     image_hits = search_results[:named_count] if named_count else search_results
     return finish_answer(query, completion.choices[0].message.content or "", search_results, image_hits,
                          search_query, query_vector)
+
+def format_notes(notes: List[str]) -> str:
+    """백로그 참고 문구. '기획자 확인 대기' 항목은 같은 머리말이 줄마다 반복되지 않게 하나로 묶어 글머리표로 보여준다"""
+    waiting = [n[len(backlog.WAITING_NOTE_PREFIX):] for n in notes if n.startswith(backlog.WAITING_NOTE_PREFIX)]
+    lines = [f"📌 참고 : {n}" for n in notes if not n.startswith(backlog.WAITING_NOTE_PREFIX)]
+    if len(waiting) == 1:
+        lines.append(f"📌 참고 : {backlog.WAITING_NOTE_PREFIX}{waiting[0]}")
+    elif waiting:
+        lines.append("📌 아직 기획자 확인을 기다리는 부분이에요\n" + "\n".join(f"• {w}" for w in waiting))
+    return "\n".join(lines)
 
 def finish_answer(query: str, raw_reply: str, hits: list, image_hits: list, search_query: str,
                   query_vector: List[float] = None) -> Dict:
@@ -164,7 +176,7 @@ def finish_answer(query: str, raw_reply: str, hits: list, image_hits: list, sear
         logger.warning("⚠️ [백로그] 참고 문구 조회 실패, 답변만 보냅니다: %s", e)
         notes = []
     if notes:
-        ai_reply += "\n\n" + "\n".join(f"📌 참고 : {note}" for note in notes)
+        ai_reply += "\n\n" + format_notes(notes)
 
     # 검색 순서를 유지하며 문서당 링크 하나. 제목이 같은 다른 문서가 함께 있으면 상위 이름을 붙여 구분한다
     linked = list({hit.payload["url"]: hit.payload for hit in reversed(used_hits) if hit.payload.get("url")}.values())[::-1]

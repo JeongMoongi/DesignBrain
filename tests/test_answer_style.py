@@ -1,0 +1,86 @@
+import types
+import pytest
+import agent
+import ai_engine
+import answer_style
+import backlog
+import clients
+import qa_lens
+import search
+import slack_service
+
+format_markdown = slack_service.format_markdown_for_slack
+
+
+# --- 별표가 그대로 보이던 굵게 표시 (조사가 바로 붙으면 슬랙이 굵게 처리하지 못한다) ---
+@pytest.mark.parametrize("text,expected", [
+    ("맵 풀은 초기 *50종*이며, 챕터마다", "맵 풀은 초기 50종이며, 챕터마다"),
+    ("*고유 인카운터는 폐기된 콘텐츠*로 명시돼 있습니다.", "고유 인카운터는 폐기된 콘텐츠로 명시돼 있습니다."),
+    ("저항 계산 *뒤에 가산*하지만, ‘경직’은 *지속 100이면 이동량 0*이라고", "저항 계산 뒤에 가산하지만, ‘경직’은 지속 100이면 이동량 0이라고"),
+    ("앞에 글자*가 붙은* 굵게", "앞에 글자가 붙은 굵게"),                          # 여는 별표 앞에 글자가 붙은 경우도
+    ("**굵게**이며", "굵게이며"),                                                    # **형식도 같은 처리
+    # 제대로 보이는 굵게, 코드, 곱셈은 건드리지 않는다
+    ("• *로비* — 입장 연출", "• *로비* — 입장 연출"),
+    ("(*굵게*), *굵게*. *굵게*, *굵게*!", "(*굵게*), *굵게*. *굵게*, *굵게*!"),
+    ("*굵게*\n다음 줄", "*굵게*\n다음 줄"),
+    ("**결론:** 폭주는 `3`에서", "*결론:* 폭주는 `3`에서"),
+    ("공식은 `파워 * 저항 * 노이즈`예요", "공식은 `파워 * 저항 * 노이즈`예요"),
+    ("파워 * 저항 * 노이즈", "파워 * 저항 * 노이즈"),
+    ("`a*b*c`는 코드", "`a*b*c`는 코드"),
+    ("```\n*50종*이며\n```", "```\n*50종*이며\n```"),                                # 코드 블록 안은 그대로
+])
+def test_bold_that_slack_cannot_render_loses_its_asterisks(text, expected):
+    assert format_markdown(text) == expected
+
+
+# --- 백로그 참고 문구: 같은 머리말을 줄마다 반복하지 않는다 ---
+def waiting(text):
+    return f"{backlog.WAITING_NOTE_PREFIX}{text}"
+
+
+def test_waiting_notes_share_one_header():
+    notes = [waiting("결정이 필요함: 계산 방식"), waiting("결정이 필요함: 한 축만 0인 경우"), "정문기 님이 A를 확인하셨습니다."]
+    text = ai_engine.format_notes(notes)
+    assert text.splitlines() == ["📌 참고 : 정문기 님이 A를 확인하셨습니다.", "📌 아직 기획자 확인을 기다리는 부분이에요",
+                                 "• 결정이 필요함: 계산 방식", "• 결정이 필요함: 한 축만 0인 경우"]
+    assert text.count("아직 기획자 확인을 기다리는") == 1
+
+
+def test_a_single_waiting_note_and_other_notes_keep_their_old_look():
+    assert ai_engine.format_notes([waiting("결정이 필요함: 계산 방식")]) == f"📌 참고 : {waiting('결정이 필요함: 계산 방식')}"
+    assert ai_engine.format_notes(["A", "B"]) == "📌 참고 : A\n📌 참고 : B"
+
+
+def test_answers_carry_the_grouped_notes(monkeypatch):
+    monkeypatch.setattr(backlog, "notes_for_answer", lambda vec, pages: [waiting("A"), waiting("B"), waiting("C")])
+    answer = ai_engine.finish_answer("질문", "답변", [], [], "질문", [0.1])["AI_답변"]
+    assert answer == "답변\n\n📌 아직 기획자 확인을 기다리는 부분이에요\n• A\n• B\n• C"
+
+
+# --- 두 답변 방식 모두에 읽기 기준이 들어간다 ---
+def test_style_rules_cover_what_makes_answers_hard_to_read():
+    text = answer_style.STYLE_PROMPT
+    for rule in ("첫 줄에 결론", "40자 안팎", "60자를 넘기지", "3줄 이하", "최대 5개", "`코드`", "조사", "본문에서 말하지 마라"):
+        assert rule in text
+
+
+def test_agent_gets_style_before_qa_rules():
+    prompt = agent.SYSTEM_PROMPT
+    assert answer_style.STYLE_PROMPT in prompt and qa_lens.QA_PROMPT in prompt
+    assert prompt.index(answer_style.STYLE_PROMPT) < prompt.index(qa_lens.QA_PROMPT)
+
+
+def test_classic_answers_get_the_same_style(monkeypatch):
+    sent = []
+    point = types.SimpleNamespace(id="p1", score=0.9, payload={"page_id": "P1", "title": "문서", "text": "본문", "url": "https://notion/p"})
+    completion = types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="답변"))])
+    openai = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(
+        create=lambda **kwargs: sent.append(kwargs) or completion)))
+    monkeypatch.setattr(search, "rewrite_search_query", lambda query, history: query)
+    monkeypatch.setattr(search, "search_chunks", lambda query, vector: ([point], 0))
+    monkeypatch.setattr(clients, "get_embedding", lambda text: [0.1])
+    monkeypatch.setattr(clients, "get_openai", lambda: openai)
+    monkeypatch.setattr(backlog, "notes_for_answer", lambda vec, pages: [])
+    ai_engine._ask_ai("질문", [], {})
+    system = sent[0]["messages"][0]["content"]
+    assert answer_style.STYLE_PROMPT in system and "정확하고 상세하게" not in system
