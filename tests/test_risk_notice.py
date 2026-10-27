@@ -95,7 +95,11 @@ def test_change_ratio():
     assert risk_notice.change_ratio(same, risk_notice.fingerprint("다\n  나  \n\n가")) == 0       # 순서·공백·빈 줄은 무시
     assert risk_notice.change_ratio(same, risk_notice.fingerprint("라\n마")) == 1
     assert risk_notice.change_ratio([], []) == 0
-    assert 0.3 < risk_notice.change_ratio(risk_notice.fingerprint(body()), risk_notice.fingerprint(body(8))) < 0.7
+    base = risk_notice.fingerprint(body())
+    assert risk_notice.change_ratio(base, risk_notice.fingerprint(body(4))) == pytest.approx(0.2)              # 20줄 중 4줄 수정
+    assert risk_notice.change_ratio(base, risk_notice.fingerprint(body() + "\n추가 1\n추가 2")) == pytest.approx(0.1)  # 2줄 추가
+    assert risk_notice.change_ratio(base, risk_notice.fingerprint("\n".join(f"줄 {i}" for i in range(14)))) == pytest.approx(0.3)  # 6줄 삭제
+    assert risk_notice.change_ratio([], risk_notice.fingerprint("새 문서")) == 1
 
 
 # --- 알림 ---

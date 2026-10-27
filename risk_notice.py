@@ -75,10 +75,12 @@ def fingerprint(text: str) -> List[str]:
 
 
 def change_ratio(old: List[str], new: List[str]) -> float:
-    """0(같음) ~ 1(전부 다름): 두 본문의 줄 집합에서 겹치지 않는 비율"""
+    """0(같음) ~ 1(전부 다름): 지난번 본문의 줄 수 대비 바뀐 줄의 비율.
+    고친 줄은 빠진 줄과 새 줄이 하나씩 생기므로 빠진 줄 수와 새 줄 수 중 큰 쪽을 센다 (20줄 중 4줄 수정·추가·삭제 = 20%)"""
     old_set, new_set = set(old), set(new)
-    union = old_set | new_set
-    return 1 - len(old_set & new_set) / len(union) if union else 0.0
+    if not old_set:
+        return 1.0 if new_set else 0.0
+    return min(1.0, max(len(old_set - new_set), len(new_set - old_set)) / len(old_set))
 
 
 # --- [마지막으로 알린 본문 기록: 문서마다 하나] ---
