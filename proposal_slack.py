@@ -88,12 +88,11 @@ def headline(record: Dict) -> str:
 
 
 def item_blocks(record: Dict) -> List[Dict]:
-    """제안 하나: 한 줄 요약·근거·참고 문서, 사서 제안, 버튼"""
+    """제안 하나: 한 줄 요약·왜 문제인지·참고 문서, 사서 제안, 버튼"""
     what = TYPE_LABELS[record["proposal_type"]]
     if record["proposal_type"] == backlog.WRITING:
         what += f" ('{record['new_doc_title']}')"
-    problem = record.get("problem", "")
-    head = [f"*{headline(record)}*", f"근거 · {problem}" if problem and record.get("summary") else problem]
+    head = [f"*{headline(record)}*", record.get("problem", "")]
     if record.get("docs"):
         head.append(f"참고 문서: {doc_links(record['docs'])}")
     proposal = f"💡 *사서 제안* — 통과하면 {what}\n```{record['proposal']}```"
