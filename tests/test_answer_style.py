@@ -1,3 +1,4 @@
+import re
 import types
 import pytest
 import agent
@@ -60,8 +61,30 @@ def test_answers_carry_the_grouped_notes(monkeypatch):
 # --- 두 답변 방식 모두에 읽기 기준이 들어간다 ---
 def test_style_rules_cover_what_makes_answers_hard_to_read():
     text = answer_style.STYLE_PROMPT
-    for rule in ("첫 줄에 결론", "40자 안팎", "60자를 넘기지", "3줄 이하", "최대 5개", "`코드`", "조사", "본문에서 말하지 마라"):
+    for rule in ("첫 줄에 결론", "40자 안팎", "60자를 넘기지", "3줄 이하의 덩어리", "한 줄에 하나씩", "본문에서 말하지 마라"):
         assert rule in text
+
+
+def test_style_only_shapes_the_writing_and_never_trims_the_content():
+    """eval_agent.py로 확인된 회귀: 항목 수 제한과 '군더더기' 규칙이 목록과 '참고로' 줄을 잘라냈다"""
+    text = answer_style.STYLE_PROMPT
+    assert "항상 우선" in text and "내용을 줄이는 데 이 기준을 쓰지 마라" in text           # 내용 규칙이 먼저다
+    assert not re.search(r"최대 \d+개|\d+개까지|\d+개 이하", text)                          # 항목 개수 제한은 없다
+    assert "개수를 줄이지 말고 문서에 있는 것을 모두" in text and "수치·조건을 빼지 마라" in text   # 목록·구성 질문은 빠짐없이
+    assert "'참고로' 한 줄" in text and "군더더기가 아니라 가장 도움이 되는 부분" in text        # 헷갈린 것을 바로잡는 줄은 허용
+    assert "수치·식·좌표에만" in text and "항목명" not in text and "이름은 코드로 감싸지 마라" in text   # 코드는 값에만
+
+
+def test_style_does_not_fight_the_formatting_fix_for_bold():
+    # 조사가 붙은 굵게는 slack_service.drop_unrenderable_bold가 정리하므로 모델에게 따로 시키지 않는다 (어색한 띄어쓰기가 생겼다)
+    text = answer_style.STYLE_PROMPT
+    assert "조사" not in text and "별표가 그대로" not in text
+
+
+def test_style_agrees_with_the_agents_own_content_rules():
+    prompt = agent.SYSTEM_PROMPT
+    assert "'참고로 ~는 있어요'처럼" in prompt and "범주별로 각각 찾아 모아라" in prompt     # 에이전트의 기존 내용 규칙
+    assert prompt.index("[답변 원칙]") < prompt.index("[읽기 쉬운 답변]")                    # 읽기 기준은 그 뒤에 덧붙는다
 
 
 def test_agent_gets_style_before_qa_rules():
