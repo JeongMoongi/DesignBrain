@@ -137,9 +137,9 @@ def test_parse_findings_cleans_summary_and_category():
 
 def test_item_leads_with_one_line_summary(store):
     record = add({**DECISION, "category": "conflict", "summary": "잔불 강타 위치가 문서마다 달라요: 디고리 파트너 ↔ 전투 요소 리더",
-                  "problem": "「디고리」 \"파트너 스킬\" / 「전투 요소」 \"리더 스킬\""})
+                  "problem": "디고리는 파트너 스킬이라 하나 전투 요소는 리더 스킬이라 해서 구현이 갈린다."})
     head = proposal_slack.item_blocks(record)[0]["text"]["text"]
-    assert head.startswith("*🔀 잔불 강타 위치가 문서마다 달라요: 디고리 파트너 ↔ 전투 요소 리더*\n근거 · 「디고리」")
+    assert head.startswith("*🔀 잔불 강타 위치가 문서마다 달라요: 디고리 파트너 ↔ 전투 요소 리더*\n디고리는 파트너 스킬이라")
     assert DECISION["title"] not in head
     old = proposal_slack.item_blocks(add())[0]["text"]["text"]                          # 요약이 없는 예전 제안은 제목 그대로
     assert old.startswith(f"*{DECISION['title']}*\n{DECISION['problem']}")
