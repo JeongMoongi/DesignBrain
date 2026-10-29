@@ -93,8 +93,9 @@ def test_append_decision_adds_heading_once(notion_calls, monkeypatch):
     notion_writer.append_decision("P1", "결정이 필요함: X", "- 이렇게 한다", "정문기")
     (method, path, body), = notion_calls
     assert (method, path) == ("PATCH", "blocks/P1/children")
-    kinds = [b["type"] for b in body["children"]]
-    assert kinds == ["heading_2", "paragraph", "bulleted_list_item"]
+    assert [b["type"] for b in body["children"]] == ["heading_2", "paragraph"]
+    # 내용은 결정 제목의 하위 블록으로 들여쓴다
+    assert [b["type"] for b in body["children"][1]["paragraph"]["children"]] == ["bulleted_list_item"]
     title, stamp = body["children"][1]["paragraph"]["rich_text"]
     # 결정 기록에는 승인된 결정만 들어가므로 '결정이 필요함:'을 뗀다
     assert title["text"]["content"] == "X"
@@ -103,6 +104,13 @@ def test_append_decision_adds_heading_once(notion_calls, monkeypatch):
     monkeypatch.setattr(notion_writer, "has_decision_heading", lambda page_id: True)
     notion_writer.append_decision("P1", "결정이 필요함: Y", "내용", None)
     assert notion_calls[1][2]["children"][0]["type"] == "paragraph"
+
+
+def test_append_decision_drops_label_line(notion_calls, monkeypatch):
+    monkeypatch.setattr(notion_writer, "has_decision_heading", lambda page_id: True)
+    notion_writer.append_decision("P1", "결정이 필요함: X", "[결정 기록에 붙일 결정]\n- 이렇게 한다", None)
+    title_block, = notion_calls[0][2]["children"]
+    assert [b["type"] for b in title_block["paragraph"]["children"]] == ["bulleted_list_item"]
 
 
 def test_create_proposal_page_sets_assignee(notion_calls):
