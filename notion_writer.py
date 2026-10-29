@@ -86,13 +86,17 @@ def without_label(text: str) -> str:
 
 
 def append_decision(page_id: str, title: str, text: str, approver_name: Optional[str]) -> None:
-    """원본 문서 맨 아래 결정 기록에 승인된 결정을 덧붙인다. 결정 기록 제목이 없으면 먼저 만든다."""
+    """원본 문서 맨 아래 결정 기록에 승인된 결정을 덧붙인다. 결정 기록 제목이 없으면 먼저 만든다.
+    내용은 결정 제목 블록의 하위 블록으로 넣어 한 단계 들여쓴다."""
     blocks = [] if has_decision_heading(page_id) else [block("heading_2", DECISION_HEADING)]
     stamp = f"{datetime.now(backlog.KST):%Y-%m-%d} · 승인: {approver_name or '기획자'}"
+    body = text_to_blocks(without_label(text))
     blocks.append({"object": "block", "type": "paragraph", "paragraph": {
-        "rich_text": rich_text(decided_title(title), bold=True) + rich_text(f"  ({stamp})", color="gray")}})
-    blocks += text_to_blocks(without_label(text))
-    append_blocks(page_id, blocks)
+        "rich_text": rich_text(decided_title(title), bold=True) + rich_text(f"  ({stamp})", color="gray"),
+        "children": body[:BLOCKS_PER_REQUEST]}})
+    added = _request("PATCH", f"blocks/{page_id}/children", {"children": blocks})
+    if len(body) > BLOCKS_PER_REQUEST:
+        append_blocks(added["results"][-1]["id"], body[BLOCKS_PER_REQUEST:])
     logger.info("📝 [노션 쓰기] 결정 기록 추가: %s (page_id: %s)", title, page_id)
 
 
