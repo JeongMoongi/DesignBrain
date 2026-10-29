@@ -44,6 +44,7 @@ PROMPT = (
     "- 조건 분기가 많거나, 예외 상황의 처리가 적혀 있지 않다\n"
     "- '미정'·'TBD'·수치 없음처럼 모호하거나 비어 있는 서술이 있다\n"
     "- 새로 도입한 개념·용어라 기존 문서에 근거가 없다\n"
+    "- 연출·애니메이션의 타이밍이 동작과 맞물린다\n"
     "- 강약이 극단으로 갈 수 있는 수치나 성장 구조가 있다\n\n"
     "[세 덩어리로 나눠 써라. 해당하는 것만 쓰고, 없으면 빈 배열로 둬라]\n"
     "1) unknown (❓ 미정의, 최대 3개): 문서에 처리 기준이 없어서 QA가 정답을 알 수 없는 것. 기획에 먼저 물어봐야 하는 것들이다. "
@@ -219,10 +220,13 @@ def _notify(doc_data: Dict, requested_by: Optional[str]) -> bool:
         logger.info("ℹ️ [테스트 위험 알림] '%s': 알릴 만한 것이 없어 보내지 않습니다.", title)
         return False
     contact = find_contact(client, page_id, requested_by) if risks["unknown"] else {}
+    # 머리줄의 '처음 등록 / N% 수정'은 이전에 기록이 있는지가 아니라 QA가 실제로 알림을 받은 적이 있는지로 정한다
+    # (처음엔 알릴 게 없어 기록만 남겼다면 QA에게는 이번이 처음이다). 다시 알릴지는 위에서 바뀐 비율로 이미 정했다
+    shown_change = ratio if previous and previous.get("notified") else None
     sent = 0
     for recipient in config.TEST_NOTIFY_IDS:
         try:
-            client.chat_postMessage(channel=recipient, text=message_text(doc_data, risks, ratio, contact_text(contact, recipient)))
+            client.chat_postMessage(channel=recipient, text=message_text(doc_data, risks, shown_change, contact_text(contact, recipient)))
             sent += 1
         except Exception:
             logger.exception("🚨 [테스트 위험 알림] %s 에게 보내지 못했습니다 ('%s')", recipient, title)

@@ -102,6 +102,7 @@ def test_analysis_prompt_separates_unknowns_from_testable_things_and_filters_vie
     assert qa_lens.VIEW_RULE in prompt and qa_lens.JUDGE_RULE in prompt
     assert "개발자 관점" in prompt and "해당하는 게 없으면 쓰지 않는다" in prompt           # 추상적·개발자 관점은 쓰지 않는다
     assert "해보기 → 정상 기준" in prompt and "세 배열을 모두 비워라" in prompt
+    assert "연출·애니메이션의 타이밍이 동작과 맞물린다" in prompt                      # 위험 신호를 빠뜨리지 않았다
 
 
 def test_overlong_items_are_cut_with_an_ellipsis(ai):
@@ -164,6 +165,19 @@ def test_notice_is_short_enough_to_skim(ai, slack):
     assert sum(l.startswith("• ") for l in lines) == risk_notice.MAX_UNKNOWN + risk_notice.MAX_VIEWS
     assert sum(l[:2] in ("1.", "2.", "3.", "4.") for l in lines) == risk_notice.MAX_TESTS
     assert max(len(l) for l in lines) <= risk_notice.TEST_NAME_CHARS + risk_notice.TEST_CHARS + 6      # 어떤 줄도 길게 늘어지지 않는다
+
+
+def test_first_alert_after_a_quiet_analysis_is_still_a_first_registration(ai, slack):
+    """처음엔 알릴 게 없어 기록만 남겼다면, 나중에 많이 바뀌어 처음 받는 알림은 '수정'이 아니라 '처음 등록'이다"""
+    ai.reply = json.dumps(NOTHING)
+    assert risk_notice.notify(doc()) is False and slack.posts == []
+    ai.reply = json.dumps(RISK_REPLY)
+    assert risk_notice.notify(doc(body(8))) is True
+    first = slack.posts[0]["text"]
+    assert "· 🆕 처음 등록" in first and "수정" not in first.splitlines()[0]
+    assert risk_notice.get_notice(PAGE_ID)["notified"] is True
+    assert risk_notice.notify(doc(body(20, tag="전면수정"))) is True                  # 알림을 받은 뒤의 변경은 수정으로 표시
+    assert "· 🔄 " in slack.posts[2]["text"] and "% 수정" in slack.posts[2]["text"]
 
 
 def test_a_changed_document_says_how_much_changed(ai, slack):
