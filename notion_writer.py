@@ -77,13 +77,21 @@ def decided_title(title: str) -> str:
     return REQUEST_PREFIX.sub("", title, count=1) or title
 
 
+# 대화로 고친 제안 맨 앞에 모델이 붙이곤 하던 '[결정 기록에 붙일 결정]' 같은 이름표 줄
+LABEL_LINE = re.compile(r"^\s*\[[^\]\n]*\]\s*\n")
+
+
+def without_label(text: str) -> str:
+    return LABEL_LINE.sub("", text, count=1)
+
+
 def append_decision(page_id: str, title: str, text: str, approver_name: Optional[str]) -> None:
     """원본 문서 맨 아래 결정 기록에 승인된 결정을 덧붙인다. 결정 기록 제목이 없으면 먼저 만든다."""
     blocks = [] if has_decision_heading(page_id) else [block("heading_2", DECISION_HEADING)]
     stamp = f"{datetime.now(backlog.KST):%Y-%m-%d} · 승인: {approver_name or '기획자'}"
     blocks.append({"object": "block", "type": "paragraph", "paragraph": {
         "rich_text": rich_text(decided_title(title), bold=True) + rich_text(f"  ({stamp})", color="gray")}})
-    blocks += text_to_blocks(text)
+    blocks += text_to_blocks(without_label(text))
     append_blocks(page_id, blocks)
     logger.info("📝 [노션 쓰기] 결정 기록 추가: %s (page_id: %s)", title, page_id)
 

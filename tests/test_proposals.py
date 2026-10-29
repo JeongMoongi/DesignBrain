@@ -105,6 +105,13 @@ def test_append_decision_adds_heading_once(notion_calls, monkeypatch):
     assert notion_calls[1][2]["children"][0]["type"] == "paragraph"
 
 
+def test_append_decision_drops_label_line(notion_calls, monkeypatch):
+    monkeypatch.setattr(notion_writer, "has_decision_heading", lambda page_id: True)
+    notion_writer.append_decision("P1", "결정이 필요함: X", "[결정 기록에 붙일 결정]\n- 이렇게 한다", None)
+    children = notion_calls[0][2]["children"]
+    assert [b["type"] for b in children] == ["paragraph", "bulleted_list_item"]
+
+
 def test_create_proposal_page_sets_assignee(notion_calls):
     page = notion_writer.create_proposal_page("총정리", "## 개요\n내용", "N-USER")
     method, path, body = notion_calls[0]
