@@ -11,12 +11,30 @@ import qa_log
 
 logger = logging.getLogger(__name__)
 
+BOLD_SPAN = re.compile(r"\*(?=\S)([^*\n]*?\S)\*")
+CODE_SPAN = re.compile(r"(```.*?```|`[^`\n]*`)", re.S)
+
+HANGUL = re.compile(r"[가-힣]")
+
+def drop_unrenderable_bold(text: str) -> str:
+    """슬랙은 굵게(*글자*)의 닫는 별표 바로 뒤에 글자가 붙어 있으면(예: '*50종*이며') 굵게 처리하지 못하고 별표를 그대로 보여준다.
+    한국어는 조사가 바로 붙어서 흔히 생긴다. 이 경우만 별표를 떼어 평범한 글로 만든다.
+    띄어 쓰지 않은 곱셈('2*3*4', 'ATK*1.5*치명')은 별표가 굵게와 똑같은 모양이라 구분할 수 없다. 별표가 그대로 보이는 것보다
+    수치가 바뀌어 보이는 것(2*3*4가 234로)이 훨씬 나쁘므로, '여는 별표가 단어 경계에 있고 닫는 별표 바로 뒤에 한글이 붙은' 확실한 경우가
+    아니면 그대로 둔다. 코드(`...`)와 띄어 쓴 곱셈('A * B')도 건드리지 않는다."""
+    def fix(match):
+        before = match.string[match.start() - 1] if match.start() else " "
+        after = match.string[match.end()] if match.end() < len(match.string) else " "
+        return match.group(1) if not before.isalnum() and HANGUL.match(after) else match.group(0)
+    return "".join(part if i % 2 else BOLD_SPAN.sub(fix, part) for i, part in enumerate(CODE_SPAN.split(text)))
+
 def format_markdown_for_slack(text: str) -> str:
     if not text: return ""
     # 이미지는 링크 변환보다 먼저 제거해야 `![..](..)`가 링크로 바뀌지 않음
     text = re.sub(r'!\[[^\]]*\]\(https?://[^\s)]+\)', '', text)
     text = re.sub(r'\[([^\]]*)\]\((https?://[^\s)]+)\)', r'<\2|🔗 \1>', text)
     text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
+    text = drop_unrenderable_bold(text)
     text = text.replace("- 참고 문서 :", "• *참고 문서:*")
     return text.strip()
 

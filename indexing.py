@@ -204,7 +204,7 @@ def _sync_document(page_id: str, notion_token: str, requested_by: str = None, ch
     if check_properties:
         property_check.run(doc_data, notion_token, requested_by)
         # 같은 'DB 등록'에서 QA 담당자에게 더 세심히 볼 영역을 DM으로 알린다 (별도 스레드, 받을 사람이 설정돼 있을 때만)
-        risk_notice.notify_async(doc_data)
+        risk_notice.notify_async(doc_data, requested_by)
     try:
         librarian.enqueue(page_id, requested_by)
     except Exception as e:
