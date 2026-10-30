@@ -76,5 +76,28 @@ TEST_NOTIFY_IDS = [i.strip() for i in os.environ.get("TEST_NOTIFY_IDS", "").spli
 TEST_NOTICE_CHANGE_RATIO = float(os.environ.get("TEST_NOTICE_CHANGE_RATIO", "0.3"))
 # 문서마다 마지막으로 알린 본문의 줄 지문 (벡터 없음)
 TEST_NOTICE_COLLECTION = "test_notices"
+
+# Jira 연동 (jira_client.py, sprint_tasks.py): 'Brain, 이번 스프린트에 내가 할 일이 뭐야?'에 답하려고 활성 스프린트의 카드를 읽는다. 읽기만 한다.
+# 세 값이 모두 있어야 켜진다. 토큰은 봇 전용 계정에서 만든 것을 권한다 (Atlassian API 토큰은 최대 1년이면 만료된다)
+def _jira_origin(url: str) -> str:
+    """'https://southpaw.atlassian.net/jira/software/…/boards/1' 같은 주소를 붙여 넣어도 'https://southpaw.atlassian.net'만 쓴다"""
+    from urllib.parse import urlsplit
+    parts = urlsplit((url or "").strip())
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+JIRA_BASE_URL = _jira_origin(os.environ.get("JIRA_BASE_URL", ""))
+JIRA_EMAIL = os.environ.get("JIRA_EMAIL", "").strip()
+JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN", "").strip()
+# 범위 지정(scoped) API 토큰과 서비스 계정은 사이트 주소가 아니라 api.atlassian.com/ex/jira/<Cloud ID>로 호출해야 한다. 그 토큰이면 Cloud ID를 넣는다 (python jira_check.py가 알려준다).
+# 범위가 없는 일반 API 토큰이면 비워 둔다. 카드 링크는 어느 쪽이든 JIRA_BASE_URL(사이트 주소)로 만든다
+JIRA_CLOUD_ID = os.environ.get("JIRA_CLOUD_ID", "").strip()
+# 팀이 카드에 만들어 둔 사용자 필드의 이름. space마다 다른 필드여도 이름이 같으면 모두 찾는다. 담당자는 Jira 기본 필드(assignee)를 쓴다
+JIRA_FIELD_APPROVER = os.environ.get("JIRA_FIELD_APPROVER", "확인자")
+JIRA_FIELD_PARTICIPANT = os.environ.get("JIRA_FIELD_PARTICIPANT", "참여자")
+# 슬랙 ID ↔ Jira 계정 ID를 직접 짝지어 줄 때 (이메일이 Jira에서 숨겨져 자동으로 못 찾는 사람용): 'U01ABC:5b10ac8d82e05b22cc7d4ef5,U02DEF:…'
+JIRA_ACCOUNT_MAP = dict(pair.strip().split(":", 1) for pair in os.environ.get("JIRA_ACCOUNT_MAP", "").split(",") if ":" in pair)
+# 활성 스프린트 카드를 다시 읽기 전까지 기억해 두는 시간(초). 한 번 읽은 결과를 여러 사람의 질문이 같이 쓴다
+JIRA_CACHE_SECONDS = int(os.environ.get("JIRA_CACHE_SECONDS", "300"))
+# '어느 space에 활성 스프린트가 있는가'는 스프린트가 바뀔 때만 달라지므로 더 오래 기억한다 (초)
+JIRA_SPRINT_CACHE_SECONDS = int(os.environ.get("JIRA_SPRINT_CACHE_SECONDS", "1800"))
 # 에이전트가 흩어진 정보의 종합 문서를 사서에게 요청하면 실제로 작업 목록에 올린다 (평가 실행에서는 끄고 기록만 한다)
 SYNTHESIS_REQUESTS = True

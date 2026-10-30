@@ -4,6 +4,7 @@ import random
 import re
 import requests
 import ai_engine
+import asker
 import backlog
 import config
 import notion_parser
@@ -122,10 +123,18 @@ def event_thread_ts(event):
     (스레드 답장을 새 스레드로 잡으면 대화 기록이 비어 후속 질문이 맥락 없이 검색된다)"""
     return event.get("thread_ts") or event.get("ts")
 
+def slack_profile(client, user_id: str) -> dict:
+    """질문한 사람의 슬랙 프로필 {"name", "email"} (이메일은 users:read.email 권한이 있어야 보인다)"""
+    user = client.users_info(user=user_id)["user"]
+    profile = user.get("profile", {})
+    return {"name": user.get("real_name") or profile.get("real_name") or profile.get("display_name") or "", "email": profile.get("email", "")}
+
 def process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text, user_id=None):
     """어떤 단계에서 실패하더라도 사용자가 '분석 중' 메세지만 보고 기다리지 않도록 실패 원인을 스레드에 안내한다.
     '분석 중' 메세지를 이미 보냈다면 그 메세지를 실패 안내로 바꾼다. 결과와 관계없이 질문 기록을 남긴다."""
     sent = {}
+    # 에이전트의 도구(예: 내 Jira 카드)가 '질문한 사람 본인'을 알 수 있게 한다. 프로필은 도구가 필요할 때만 읽는다
+    asker_token = asker.set_asker(asker.Asker(user_id, lambda: slack_profile(client, user_id))) if user_id else None
     try:
         _process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_text, sent)
     except Exception as e:
@@ -144,6 +153,8 @@ def process_chat_and_reply(client, say, channel_id, thread_ts, message_ts, raw_t
         except Exception:
             logger.exception("🚨 [Slack] 실패 안내 메세지 전송도 실패")
     finally:
+        if asker_token is not None:
+            asker.reset(asker_token)
         log_question(client, channel_id, thread_ts, message_ts, user_id, sent)
 
 def log_question(client, channel_id, thread_ts, message_ts, user_id, sent):

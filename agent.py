@@ -9,9 +9,11 @@ import answer_style
 import backlog
 import clients
 import config
+import jira_client
 import notion_parser
 import qa_lens
 import search
+import sprint_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +131,8 @@ class AgentState:
         self.query = ""
         # 사서에게 요청한 종합 문서 주제
         self.summary_requests = []
+        # 도구가 양식을 직접 만든 결과: 이것이 있으면 모델이 다시 쓰지 않고 그대로 답변으로 보낸다 (예: 내 Jira 카드 목록)
+        self.direct_answer = None
         # 답변 스레드에 첨부할 마크다운 파일 ({"title", "content"})
         self.exports = []
         self.hits = {}
@@ -296,7 +300,7 @@ def tool_export_markdown(state: AgentState, title: str, content: str) -> str:
 
 TOOL_FUNCTIONS = {"search_docs": tool_search_docs, "list_docs": tool_list_docs, "read_document": tool_read_document,
                   "read_original": tool_read_original, "request_summary": tool_request_summary,
-                  "export_markdown": tool_export_markdown}
+                  "export_markdown": tool_export_markdown, "my_sprint_tasks": sprint_tasks.tool_my_sprint_tasks}
 
 
 def run_tool(state: AgentState, name: str, arguments: str) -> str:
@@ -315,6 +319,17 @@ def run_tool(state: AgentState, name: str, arguments: str) -> str:
         return f"도구 인자가 잘못됨: {e}"
 
 
+def direct_result(state: AgentState, usage: list) -> Dict:
+    """도구가 만든 답변을 그대로 돌려준다. 문서를 쓰지 않은 답변이므로 참고 문서·백로그 문구·도판은 붙이지 않는다"""
+    input_tokens = sum(u.input_tokens for u in usage if u)
+    output_tokens = sum(u.output_tokens for u in usage if u)
+    logger.info("🤖 [에이전트] 도구 결과를 그대로 답변으로 보냅니다. 호출 %d회, 도구 %d회, 토큰 입력 %d / 출력 %d",
+                len(usage), len(state.calls), input_tokens, output_tokens)
+    return {"status": "success", "AI_답변": state.direct_answer, "page_ids": [], "images": [], "search_query": " | ".join(state.calls),
+            "used_docs": [], "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens, "tool_calls": len(state.calls)},
+            "summary_requests": [], "exports": []}
+
+
 def ask_agent(query: str, chat_history: List[Dict[str, str]], progress: Dict[str, str],
               on_progress: Callable[[str], None] = None) -> Dict:
     refined = config.AGENT_SOURCE == "refined"
@@ -322,8 +337,11 @@ def ask_agent(query: str, chat_history: List[Dict[str, str]], progress: Dict[str
     state.query = query
     progress["stage"] = "자료 탐색"
     openai_client = clients.get_openai()
-    options = {"model": config.AGENT_MODEL, "instructions": SYSTEM_PROMPT + (REFINED_PROMPT if refined else ""),
-               "tools": TOOLS + ([READ_ORIGINAL_TOOL] if refined else []) + [REQUEST_SUMMARY_TOOL, EXPORT_MARKDOWN_TOOL],
+    # Jira 연동이 설정돼 있을 때만 '내 스프린트 카드' 도구와 안내를 붙인다 (설정하지 않은 환경은 동작이 그대로다)
+    jira = jira_client.configured()
+    options = {"model": config.AGENT_MODEL, "instructions": SYSTEM_PROMPT + (REFINED_PROMPT if refined else "") + (sprint_tasks.PROMPT if jira else ""),
+               "tools": TOOLS + ([READ_ORIGINAL_TOOL] if refined else []) + [REQUEST_SUMMARY_TOOL, EXPORT_MARKDOWN_TOOL]
+               + ([sprint_tasks.TOOL] if jira else []),
                "reasoning": {"effort": config.AGENT_REASONING_EFFORT}}
     history = [{"role": h.get("role", "user"), "content": h.get("content", "")}
                for h in chat_history[-ai_engine.ANSWER_HISTORY_TURNS:]]
@@ -337,6 +355,10 @@ def ask_agent(query: str, chat_history: List[Dict[str, str]], progress: Dict[str
             break
         outputs = [{"type": "function_call_output", "call_id": c.call_id, "output": run_tool(state, c.name, c.arguments)}
                    for c in calls]
+        # 도구가 완성된 답변을 만들었고 이번 차례에 부른 도구가 그것뿐이면 모델을 한 번 더 부르지 않고 그대로 보낸다
+        # (양식이 흔들리지 않고 호출 한 번과 토큰이 줄어든다. 다른 도구도 함께 불렀다면 평소처럼 모델이 이어서 답한다)
+        if state.direct_answer is not None and all(c.name == sprint_tasks.TOOL["name"] for c in calls):
+            return direct_result(state, usage)
         # 마지막 차례에는 도구를 더 쓰지 못하게 해 모은 자료로 답하게 한다
         final_round = round_no == config.AGENT_MAX_TOOL_ROUNDS
         response = openai_client.responses.create(previous_response_id=response.id, input=outputs,
